@@ -3,7 +3,7 @@
 A Go library for building audio/video pipelines. It provides the core data model, codec utilities, container formats, and a fan-out relay hub used by the `vrtc` edge and recording services.
 
 **Module:** `github.com/vtpl1/vrtc-sdk`  
-**Version:** v0.1.0  
+**Version:** v0.1.1  
 **Go version:** 1.26+
 
 ---
@@ -268,7 +268,7 @@ This module is consumed by `github.com/vtpl1/vrtc` via a Go workspace. The
 use ./vrtc-sdk
 use ./vrtc
 
-replace github.com/vtpl1/vrtc-sdk v0.1.0 => ./vrtc-sdk
+replace github.com/vtpl1/vrtc-sdk v0.1.1 => ./vrtc-sdk
 ```
 
-The `replace` directive is required because the module is not yet published at `v0.1.0`.
+The `replace` directive is required because the module is not yet published at `v0.1.1`.
