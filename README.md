@@ -3,7 +3,7 @@
 A Go library for building audio/video pipelines. It provides the core data model, codec utilities, container formats, and a fan-out relay hub used by the `vrtc` edge and recording services.
 
 **Module:** `github.com/vtpl1/vrtc-sdk`  
-**Version:** v0.1.1  
+**Version:** v0.2.0
 **Go version:** 1.26+
 
 ---
@@ -13,6 +13,7 @@ A Go library for building audio/video pipelines. It provides the core data model
 | Package | Purpose |
 |---------|---------|
 | `av` | Core types: `Packet`, `Stream`, `CodecData`, `Demuxer`, `Muxer`, codec constants |
+| `av/chain` | Multi-segment chaining demuxer with `SegmentSource` abstraction for sequential playback |
 | `av/segment` | Segment recording helpers: storage-aware file writer, optional fragment ring buffer, segment validation |
 | `av/relayhub` | Fan-out coordinator: one demuxer → N muxer consumers |
 | `av/codec/h264parser` | H.264 SPS/PPS extraction, AVCC↔Annex B conversion |
@@ -199,6 +200,39 @@ if err := mux.Close(); err != nil { /* handle */ }
 `ValidateSegment(path)` performs a fast structural check (`ftyp` present, valid box sizes, at least one `moof`).
 Use sentinel errors such as `ErrSegmentEmpty`, `ErrSegmentNoFtyp`, and `ErrSegmentNoMoof` for error handling.
 
+### Chaining demuxer (`av/chain`)
+
+Chains multiple segment demuxers into a single monotonic `av.DemuxCloser` stream.
+DTS values are adjusted at each segment boundary so timestamps remain monotonically
+non-decreasing across all segments.
+
+```go
+// Open the first segment eagerly (fail fast).
+first, _ := openSegment(paths[0])
+
+// Provide remaining segments lazily via SegmentSource.
+src := chain.SliceSource(paths[1:], func(ctx context.Context, path string) (av.DemuxCloser, error) {
+    return openSegment(path)
+})
+
+dmx := chain.NewChainingDemuxer(first, src)
+streams, _ := dmx.GetCodecs(ctx)
+for {
+    pkt, err := dmx.ReadPacket(ctx)
+    if err == io.EOF { break }
+    // pkt.DTS is monotonically non-decreasing across all segments
+}
+dmx.Close()
+```
+
+Implement `chain.SegmentSource` for custom sources (e.g. polling a recording index for new segments in follow mode):
+
+```go
+type SegmentSource interface {
+    Next(ctx context.Context) (av.DemuxCloser, error) // io.EOF when done; may block
+}
+```
+
 ### gRPC transport (`av/format/grpc`)
 
 Bidirectional streaming transport for AV packets between vrtc nodes over gRPC. The `AVTransportService` defines two streaming RPCs plus control RPCs:
@@ -307,8 +341,4 @@ This module is consumed by `github.com/vtpl1/vrtc` via a Go workspace. The
 ```
 use ./vrtc-sdk
 use ./vrtc
-
-replace github.com/vtpl1/vrtc-sdk v0.1.1 => ./vrtc-sdk
 ```
-
-The `replace` directive is required because the module is not yet published at `v0.1.1`.
