@@ -54,12 +54,13 @@ type mp4Track struct {
 // Create with NewMuxer or Create; call WriteHeader once, then WritePacket for
 // each packet, then WriteTrailer (or Close) when done.
 type Muxer struct {
-	w        io.Writer
-	wc       io.Closer
-	tracks   []*mp4Track
-	trackMap map[uint16]*mp4Track
-	written  bool
-	closed   bool
+	w            io.Writer
+	wc           io.Closer
+	tracks       []*mp4Track
+	trackMap     map[uint16]*mp4Track
+	written      bool
+	closed       bool
+	writerClosed bool
 }
 
 // NewMuxer returns a Muxer that writes MP4 data to w.
@@ -157,10 +158,17 @@ func (m *Muxer) WriteTrailer(_ context.Context, _ error) error {
 }
 
 // Close calls WriteTrailer (best-effort) and then closes the underlying writer.
+// Safe to call multiple times.
 func (m *Muxer) Close() error {
 	if !m.closed {
 		_ = m.WriteTrailer(context.Background(), nil)
 	}
+
+	if m.writerClosed {
+		return nil
+	}
+
+	m.writerClosed = true
 
 	if m.wc != nil {
 		return m.wc.Close()

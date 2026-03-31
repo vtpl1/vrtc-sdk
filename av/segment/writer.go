@@ -43,6 +43,7 @@ type AdaptiveWriter struct {
 	profile      StorageProfile
 	written      atomic.Int64 // bytes flushed to the underlying file
 	preallocated int64        // preallocated size in bytes (0 = none)
+	closed       bool
 }
 
 // NewAdaptiveWriter creates a segment file at path with storage-optimised buffering.
@@ -96,8 +97,14 @@ func (w *AdaptiveWriter) BytesWritten() int64 {
 }
 
 // Close flushes the buffer, syncs to stable storage, truncates any preallocated
-// unused space, and closes the file.
+// unused space, and closes the file. Safe to call multiple times.
 func (w *AdaptiveWriter) Close() error {
+	if w.closed {
+		return nil
+	}
+
+	w.closed = true
+
 	if err := w.bw.Flush(); err != nil {
 		_ = w.f.Close()
 

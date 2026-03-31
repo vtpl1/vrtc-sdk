@@ -101,10 +101,13 @@ func (c *ChainingDemuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 	}
 }
 
-// Close closes the currently active demuxer. Safe to call if cur is nil.
+// Close closes the currently active demuxer. Safe to call multiple times.
 func (c *ChainingDemuxer) Close() error {
 	if c.cur != nil {
-		return c.cur.Close()
+		err := c.cur.Close()
+		c.cur = nil
+
+		return err
 	}
 
 	return nil

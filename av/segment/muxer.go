@@ -33,6 +33,7 @@ type SegmentMuxer struct {
 	path    string
 	start   time.Time
 	onClose func(SegmentCloseInfo)
+	closed  bool
 
 	// analytics flags — set during WritePacket
 	hasMotion  bool
@@ -93,7 +94,13 @@ func (m *SegmentMuxer) WriteTrailer(ctx context.Context, upstreamErr error) erro
 }
 
 // Close flushes remaining data, validates the segment, and calls onClose.
+// Safe to call multiple times; subsequent calls are no-ops.
 func (m *SegmentMuxer) Close() error {
+	if m.closed {
+		return nil
+	}
+
+	m.closed = true
 	endTime := time.Now().UTC()
 
 	err := m.inner.Close()

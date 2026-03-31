@@ -355,12 +355,22 @@ func (m *MSEWriter) WriteCodecChange(ctx context.Context, changed []av.Stream) e
 	return err
 }
 
-// Close flushes remaining samples, shuts down the HTTP server, and closes all
-// active WebSocket connections.
+// Close flushes remaining samples and closes pre-opened writers.
+// Safe to call multiple times.
 func (m *MSEWriter) Close() error {
 	m.closeOnce.Do(func() {
 		_ = m.WriteTrailer(context.Background(), nil)
 		close(m.closed)
+
+		// Close pre-opened writers (from NewFromWriters). Factory-created
+		// writers are closed per-frame in broadcast and are not our concern.
+		if m.binaryFactory == nil && m.binaryWriter != nil {
+			_ = m.binaryWriter.Close()
+		}
+
+		if m.jsonFactory == nil && m.jsonWriter != nil {
+			_ = m.jsonWriter.Close()
+		}
 	})
 
 	return nil

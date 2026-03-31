@@ -85,8 +85,9 @@ type Muxer struct {
 	trackMap map[uint16]*trackState // keyed by av.Stream.Idx
 	seqNum   uint32
 	emsgID   uint32 // monotonically increasing emsg event id
-	written  bool   // WriteHeader has been called
-	closed   bool   // WriteTrailer has been called
+	written      bool // WriteHeader has been called
+	closed       bool // WriteTrailer has been called
+	writerClosed bool // Close has been called
 
 	// dtsOffset is the DTS of the very first packet received; it is subtracted
 	// from all subsequent timestamps so the output timeline starts at zero.
@@ -234,10 +235,17 @@ func (m *Muxer) WriteTrailer(_ context.Context, _ error) error {
 
 // Close implements av.MuxCloser. It flushes any remaining data (best-effort),
 // then closes the underlying writer if it implements io.Closer.
+// Safe to call multiple times.
 func (m *Muxer) Close() error {
 	if !m.closed {
 		_ = m.WriteTrailer(context.Background(), nil)
 	}
+
+	if m.writerClosed {
+		return nil
+	}
+
+	m.writerClosed = true
 
 	if c, ok := m.w.(io.Closer); ok {
 		return c.Close()
