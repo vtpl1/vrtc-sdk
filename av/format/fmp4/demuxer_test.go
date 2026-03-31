@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/vtpl1/vrtc-sdk/av"
+	"github.com/vtpl1/vrtc-sdk/av/codec/pcm"
 	"github.com/vtpl1/vrtc-sdk/av/format/fmp4"
 )
 
@@ -117,6 +118,26 @@ func TestDemuxer_GetCodecs_AAC(t *testing.T) {
 
 	if got[0].Codec.Type() != av.AAC {
 		t.Errorf("want AAC codec, got %v", got[0].Codec.Type())
+	}
+}
+
+func TestDemuxer_GetCodecs_FLAC(t *testing.T) {
+	flac := pcm.NewFLACCodecData(av.PCM_MULAW, 8000, av.ChMono)
+	streams := []av.Stream{{Idx: 0, Codec: flac}}
+	data := muxToBytes(t, streams, nil)
+
+	dmx := fmp4.NewDemuxer(bytes.NewReader(data))
+	got, err := dmx.GetCodecs(context.Background())
+	if err != nil {
+		t.Fatalf("GetCodecs: %v", err)
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("want 1 stream, got %d", len(got))
+	}
+
+	if got[0].Codec.Type() != av.FLAC {
+		t.Errorf("want FLAC codec, got %v", got[0].Codec.Type())
 	}
 }
 

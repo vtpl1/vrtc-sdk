@@ -15,6 +15,7 @@ import (
 	"github.com/vtpl1/vrtc-sdk/av/codec/aacparser"
 	"github.com/vtpl1/vrtc-sdk/av/codec/h264parser"
 	"github.com/vtpl1/vrtc-sdk/av/codec/h265parser"
+	"github.com/vtpl1/vrtc-sdk/av/codec/pcm"
 )
 
 var (
@@ -555,6 +556,29 @@ func parseStsdEntry(data []byte, _ string) (av.CodecData, bool, error) {
 
 		return codec, false, err
 
+	case "fLaC":
+		if len(entryPayload) < audioSampleEntryHeaderSize {
+			return nil, false, ErrMalformed
+		}
+
+		chCount := binary.BigEndian.Uint16(entryPayload[16:18])
+		if chCount == 0 {
+			return nil, false, ErrMalformed
+		}
+
+		sampleRateFP := binary.BigEndian.Uint32(entryPayload[24:28])
+		sampleRate := sampleRateFP >> 16
+		if sampleRate == 0 {
+			return nil, false, ErrMalformed
+		}
+
+		_, ok := findBox(entryPayload[audioSampleEntryHeaderSize:], "dfLa")
+		if !ok {
+			return nil, false, ErrMalformed
+		}
+
+		return pcm.NewFLACCodecData(av.FLAC, sampleRate, channelLayoutFromCount(chCount)), false, nil
+
 	default:
 		return nil, false, fmt.Errorf(
 			"%w: unsupported sample entry type %q",
@@ -562,6 +586,22 @@ func parseStsdEntry(data []byte, _ string) (av.CodecData, bool, error) {
 			typ,
 		)
 	}
+}
+
+func channelLayoutFromCount(chCount uint16) av.ChannelLayout {
+	switch chCount {
+	case 1:
+		return av.ChMono
+	case 2:
+		return av.ChStereo
+	}
+
+	// Fall back to a low-bit mask with the requested channel count.
+	if chCount >= 16 {
+		return av.ChannelLayout(0xFFFF)
+	}
+
+	return av.ChannelLayout((1 << chCount) - 1)
 }
 
 // parseEsds extracts the AudioSpecificConfig bytes from an esds box payload.
