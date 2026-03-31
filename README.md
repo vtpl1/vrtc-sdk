@@ -13,6 +13,7 @@ A Go library for building audio/video pipelines. It provides the core data model
 | Package | Purpose |
 |---------|---------|
 | `av` | Core types: `Packet`, `Stream`, `CodecData`, `Demuxer`, `Muxer`, codec constants |
+| `av/segment` | Segment recording helpers: storage-aware file writer, optional fragment ring buffer, segment validation |
 | `av/relayhub` | Fan-out coordinator: one demuxer → N muxer consumers |
 | `av/codec/h264parser` | H.264 SPS/PPS extraction, AVCC↔Annex B conversion |
 | `av/codec/h265parser` | H.265 VPS/SPS/PPS extraction, RTP reassembly, AVCC↔Annex B |
@@ -158,6 +159,45 @@ mux.WriteTrailer(ctx, nil)
 ```
 
 The demuxer reads standard fMP4 files and CMAF streams produced by this muxer.
+
+### Segment recording (`av/segment`)
+
+Builds on top of `av/format/fmp4` for file-per-segment recording with optional in-memory replay.
+
+```go
+ring := segment.NewRingBuffer(10 * time.Second) // optional, can be nil
+
+mux, err := segment.NewSegmentMuxer(
+    "segments/2026-03-31T12-00-00Z.mp4",
+    time.Now().UTC(),
+    segment.ProfileAuto, // auto-detect: SSD/HDD/NAS/SAN
+    64<<20,              // optional preallocation hint (bytes)
+    ring,
+    func(info segment.SegmentCloseInfo) {
+        // info includes Path, Start/End, SizeBytes, analytics flags, validation result
+        if info.ValidationError != nil {
+            // handle invalid/corrupt segment
+        }
+    },
+)
+if err != nil { /* handle */ }
+
+if err := mux.WriteHeader(ctx, streams); err != nil { /* handle */ }
+for _, pkt := range packets {
+    if err := mux.WritePacket(ctx, pkt); err != nil { /* handle */ }
+}
+if err := mux.Close(); err != nil { /* handle */ }
+```
+
+`SegmentMuxer` tracks analytics-derived flags per segment:
+
+| Field | Set when |
+|-------|----------|
+| `HasMotion` | Any written packet has non-nil `pkt.Analytics` |
+| `HasObjects` | Any written packet has `len(pkt.Analytics.Objects) > 0` |
+
+`ValidateSegment(path)` performs a fast structural check (`ftyp` present, valid box sizes, at least one `moof`).
+Use sentinel errors such as `ErrSegmentEmpty`, `ErrSegmentNoFtyp`, and `ErrSegmentNoMoof` for error handling.
 
 ### gRPC transport (`av/format/grpc`)
 
