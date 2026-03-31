@@ -201,7 +201,7 @@ func makeMuxerFactory() (av.MuxerFactory, *sync.Map) {
 	}, registry
 }
 
-// startedSM creates and starts a StreamManager backed by mockDemuxer.
+// startedSM creates and starts a RelayHub backed by mockDemuxer.
 // t.Cleanup calls Stop() so no explicit teardown is needed in each test.
 func startedSM(t *testing.T, ctx context.Context) *relayhub.RelayHub {
 	t.Helper()
@@ -227,7 +227,7 @@ func removeConsumer(t *testing.T, h av.ConsumerHandle, ctx context.Context) {
 }
 
 // =============================================================================
-// Tests — StreamManager lifecycle
+// Tests — RelayHub lifecycle
 // =============================================================================
 
 // TestDoubleStartReturnsError verifies that a second call to Start returns
@@ -352,7 +352,7 @@ func TestCloseHandleIdempotent(t *testing.T) {
 // TestConsumerHandleCloseAutoStopsProducer verifies that a producer with no
 // remaining consumers is automatically removed after its handle is closed
 // within the cleanup ticker period (~1 s for the producer ticker + ~1 s for
-// the StreamManager ticker = <= 2 s).
+// the RelayHub ticker = <= 2 s).
 func TestConsumerHandleCloseAutoStopsProducer(t *testing.T) {
 	t.Parallel()
 
@@ -388,7 +388,7 @@ func TestConsumerHandleCloseAutoStopsProducer(t *testing.T) {
 
 	// Two ticker intervals can elapse before the producer is gone:
 	//   1. Producer's ticker removes the inactive consumer from its map.
-	//   2. StreamManager's ticker sees ConsumerCount() == 0 and removes the producer.
+	//   2. RelayHub's ticker sees ConsumerCount() == 0 and removes the producer.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if sm.GetActiveRelayCount(ctx) == 0 {
@@ -605,7 +605,7 @@ func TestConsumerChurn(t *testing.T) {
 
 // TestMultipleProducersParallel launches 10×10 goroutines: each pair of
 // (producer, consumer) indices gets its own goroutine that adds a consumer,
-// holds briefly, then removes it. Stress-tests the StreamManager's producer
+// holds briefly, then removes it. Stress-tests the RelayHub's producer
 // map locking with simultaneous access across many producer keys.
 func TestMultipleProducersParallel(t *testing.T) {
 	t.Parallel()
@@ -1251,7 +1251,7 @@ func TestMuxerRemoverCalledOnConsumerClose(t *testing.T) {
 // =============================================================================
 
 // TestCodecChangeForwardedToCodecChanger verifies that when the demuxer emits a
-// packet with non-nil NewCodecs, the stream manager forwards it via
+// packet with non-nil NewCodecs, the relay hub forwards it via
 // WriteCodecChange to any muxer that implements av.CodecChanger.
 func TestCodecChangeForwardedToCodecChanger(t *testing.T) {
 	t.Parallel()
@@ -1475,7 +1475,7 @@ func TestRapidConsumeClose(t *testing.T) {
 	wg.Wait()
 }
 
-// TestHighConcurrencyManyProducers stresses the StreamManager's producer-map
+// TestHighConcurrencyManyProducers stresses the RelayHub's producer-map
 // locking with 500 relays each served by 20 concurrent consumers. After all
 // consumers are removed, it verifies that all relays are auto-cleaned within
 // the ticker period.

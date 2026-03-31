@@ -22,10 +22,20 @@ type RelayStats struct {
 
 // ConsumeOptions configures a consumer attachment to a relay.
 type ConsumeOptions struct {
-	ConsumerID   string
+	// ConsumerID uniquely identifies the consumer within the relay.
+	// If empty, the implementation assigns a generated ID.
+	ConsumerID string
+
+	// MuxerFactory opens the downstream muxer for this consumer.
 	MuxerFactory MuxerFactory
+
+	// MuxerRemover is called after the muxer is closed to deregister it.
+	// May be nil if no deregistration is needed.
 	MuxerRemover MuxerRemover
-	ErrChan      chan<- error
+
+	// ErrChan, if non-nil, receives asynchronous write errors from the consumer's
+	// muxer. The channel should be buffered to avoid blocking the write loop.
+	ErrChan chan<- error
 }
 
 // ConsumerHandle represents an attached consumer.

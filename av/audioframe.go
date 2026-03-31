@@ -22,6 +22,8 @@ const (
 	U32                           // unsigned 32-bit integer
 )
 
+// BytesPerSample returns the number of bytes occupied by one sample in this
+// format. Returns 0 for unrecognised formats.
 func (s SampleFormat) BytesPerSample() int {
 	switch s {
 	case U8, U8P:
@@ -37,6 +39,7 @@ func (s SampleFormat) BytesPerSample() int {
 	}
 }
 
+// String returns the short name of the sample format (e.g. "S16", "FLTP").
 func (s SampleFormat) String() string {
 	switch s {
 	case U8:
@@ -79,10 +82,12 @@ func (s SampleFormat) IsPlanar() bool {
 // ChannelLayout represents Audio channel layout.
 type ChannelLayout uint16
 
+// String returns a human-readable channel-count string, e.g. "2ch".
 func (s ChannelLayout) String() string {
 	return fmt.Sprintf("%dch", s.Count())
 }
 
+// Count returns the number of audio channels encoded in the layout bitmask.
 func (s ChannelLayout) Count() int {
 	var n int
 	for s != 0 {
@@ -93,6 +98,8 @@ func (s ChannelLayout) Count() int {
 	return n
 }
 
+// Per-speaker channel flags. Composite layouts (ChStereo, Ch2_1, …) combine
+// these bits with bitwise OR; Count() returns the number of set bits.
 const (
 	ChFrontCenter = ChannelLayout(1 << iota)
 	ChFrontLeft

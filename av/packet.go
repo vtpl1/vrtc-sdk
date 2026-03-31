@@ -7,7 +7,7 @@ import (
 )
 
 // Packet stores one unit of compressed audio or video data flowing through
-// the pipeline. See docs/av-packet-spec.md for the full field contract.
+// the pipeline. See field comments below for the full field contract.
 type Packet struct {
 	// ── Flags ─────────────────────────────────────────────────────────────
 	KeyFrame        bool // true iff this is an IDR/keyframe video packet; always false for audio

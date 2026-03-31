@@ -1,3 +1,21 @@
+// Package av defines the core audio/video interfaces and types used throughout
+// vrtc-sdk. It provides codec type constants, stream metadata structures, and
+// the foundational interfaces (Demuxer, Muxer, CodecData) that all format and
+// transport packages build on.
+//
+// # Packet format
+//
+// H.264 and H.265 video data inside a Packet is always in AVCC format (ISO
+// 14496-15): each NALU is preceded by a big-endian length field. This library
+// always uses 4-byte length fields (lengthSizeMinusOne=3 in the decoder config
+// record); the spec allows 1- or 2-byte lengths but they are not supported here.
+// Use av/codec/parser to convert between AVCC and Annex B.
+//
+// # Codec types
+//
+// Codec types are opaque uint32 values created by MakeVideoCodecType or
+// MakeAudioCodecType. The package-level variables (H264, AAC, …) are the
+// canonical instances; compare with == rather than type-asserting.
 package av
 
 import "time"
@@ -25,28 +43,40 @@ func MakeAudioCodecType(base uint32) CodecType {
 	return c
 }
 
+// Well-known codec type singletons. Video types are created with
+// MakeVideoCodecType; audio types with MakeAudioCodecType (low bit set).
+//
+// RTP payload type notes:
+//   - Static PTs (assigned by RFC 3551): PCMU=0, PCMA=8, JPEG=26, MPA=14.
+//   - Dynamic PTs (96–127, negotiated via SDP per RFC 3551 §3): H.264 and Opus
+//     have no static assignment; values 96 and 111 are conventional defaults
+//     widely used in WebRTC and RTSP but are not mandated by any RFC.
 var (
 	UNKNOWN    = MakeVideoCodecType(avCodecTypeMagic + 0)
-	H264       = MakeVideoCodecType(avCodecTypeMagic + 1) // payloadType: 96
+	H264       = MakeVideoCodecType(avCodecTypeMagic + 1) // dynamic RTP PT, conventionally 96
 	H265       = MakeVideoCodecType(avCodecTypeMagic + 2)
-	JPEG       = MakeVideoCodecType(avCodecTypeMagic + 3) // payloadType: 26
+	JPEG       = MakeVideoCodecType(avCodecTypeMagic + 3) // static RTP PT: 26 (RFC 3551)
 	VP8        = MakeVideoCodecType(avCodecTypeMagic + 4)
 	VP9        = MakeVideoCodecType(avCodecTypeMagic + 5)
 	AV1        = MakeVideoCodecType(avCodecTypeMagic + 6)
 	MJPEG      = MakeVideoCodecType(avCodecTypeMagic + 7)
 	AAC        = MakeAudioCodecType(avCodecTypeMagic + 1) // MPEG4-GENERIC
-	PCM_MULAW  = MakeAudioCodecType(avCodecTypeMagic + 2) // payloadType: 0
-	PCM_ALAW   = MakeAudioCodecType(avCodecTypeMagic + 3) // payloadType: 8
-	SPEEX      = MakeAudioCodecType(avCodecTypeMagic + 4) // L16 Linear PCM (big endian)
+	PCM_MULAW  = MakeAudioCodecType(avCodecTypeMagic + 2) // static RTP PT: 0  (RFC 3551, PCMU)
+	PCM_ALAW   = MakeAudioCodecType(avCodecTypeMagic + 3) // static RTP PT: 8  (RFC 3551, PCMA)
+	SPEEX      = MakeAudioCodecType(avCodecTypeMagic + 4) // Speex
 	NELLYMOSER = MakeAudioCodecType(avCodecTypeMagic + 5)
 	PCM        = MakeAudioCodecType(avCodecTypeMagic + 6)
-	OPUS       = MakeAudioCodecType(avCodecTypeMagic + 7)  // payloadType: 111
-	MP3        = MakeAudioCodecType(avCodecTypeMagic + 8)  // MPA payload: 14, aka MPEG-1 Layer III
-	PCML       = MakeAudioCodecType(avCodecTypeMagic + 9)  // Linear PCM (little endian)
-	ELD        = MakeAudioCodecType(avCodecTypeMagic + 10) // AAC-ELD
-	FLAC       = MakeAudioCodecType(avCodecTypeMagic + 11)
+	OPUS       = MakeAudioCodecType(avCodecTypeMagic + 7) // dynamic RTP PT, conventionally 111
+	MP3        = MakeAudioCodecType(
+		avCodecTypeMagic + 8,
+	) // static RTP PT: 14 (RFC 3551, MPA — MPEG-1 Layer III)
+	PCML = MakeAudioCodecType(avCodecTypeMagic + 9)  // Linear PCM (little endian)
+	ELD  = MakeAudioCodecType(avCodecTypeMagic + 10) // AAC-ELD
+	FLAC = MakeAudioCodecType(avCodecTypeMagic + 11)
 )
 
+// String returns the human-readable name of the codec type (e.g. "H264", "AAC").
+// Returns an empty string for unrecognised types.
 func (s CodecType) String() string {
 	switch s {
 	case H264:
@@ -88,10 +118,12 @@ func (s CodecType) String() string {
 	return ""
 }
 
+// IsAudio reports whether the codec type represents an audio codec.
 func (s CodecType) IsAudio() bool {
 	return s&codecTypeAudioBit != 0
 }
 
+// IsVideo reports whether the codec type represents a video codec.
 func (s CodecType) IsVideo() bool {
 	return s&codecTypeAudioBit == 0
 }
@@ -109,12 +141,13 @@ type Stream struct {
 //
 //	codecdata.(AudioCodecData) or codecdata.(VideoCodecData)
 //
-// for H264, CodecData is AVCDecoderConfigure bytes, includes SPS/PPS.
-// for H265, CodecData is AVCDecoderConfigure bytes, includes VPS/SPS/PPS.
+// for H264, CodecData is AVCDecoderConfigurationRecord bytes, includes SPS/PPS.
+// for H265, CodecData is HEVCDecoderConfigurationRecord bytes, includes VPS/SPS/PPS.
 type CodecData interface {
 	Type() CodecType // Video/Audio codec type
 }
 
+// VideoCodecData extends CodecData with video-specific properties.
 type VideoCodecData interface {
 	CodecData
 	Width() int        // Video width
@@ -122,6 +155,7 @@ type VideoCodecData interface {
 	TimeScale() uint32 // clock frequency for timestamp conversion (e.g. 90000 for RTP and fMP4/CMAF)
 }
 
+// AudioCodecData extends CodecData with audio-specific properties.
 type AudioCodecData interface {
 	CodecData
 	SampleFormat() SampleFormat                       // audio sample format

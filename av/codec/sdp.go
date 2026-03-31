@@ -1,3 +1,6 @@
+// Package codec provides codec-specific data types and utilities for audio and
+// video streams. It includes SDP parsing for H.264/H.265 video tracks and an
+// Opus audio codec data implementation.
 package codec
 
 import (
@@ -10,6 +13,11 @@ import (
 	"github.com/vtpl1/vrtc-sdk/av/codec/h265parser"
 )
 
+// SdpToCodecs parses an SDP session description and returns CodecData for each
+// video track that carries H.264 or H.265 parameter sets (sprop-parameter-sets
+// or sprop-vps/sprop-sps/sprop-pps attributes). Audio and unsupported video
+// tracks are silently skipped.
+//
 //nolint:gocognit,funlen, gocyclo, cyclop
 func SdpToCodecs(s string) ([]av.CodecData, error) {
 	sd := sdp.SessionDescription{}

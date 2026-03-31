@@ -94,8 +94,12 @@ func (s *Writer) WriteBits64(bits uint64, n int) error {
 
 	if s.n+n > 64 {
 		move := uint(64 - s.n)
-		mask := bits >> move
-		s.bits = (s.bits << move) | mask
+		if move > 0 {
+			// Fill the remaining high-order slots in the current 64-bit staging word.
+			high := bits >> uint(n-int(move))
+			s.bits = (s.bits << move) | high
+		}
+
 		s.n = 64
 
 		err = s.FlushBits()
@@ -104,7 +108,9 @@ func (s *Writer) WriteBits64(bits uint64, n int) error {
 		}
 
 		n -= int(move)
-		bits ^= (mask << move)
+		if n > 0 && n < 64 {
+			bits &= (uint64(1) << uint(n)) - 1
+		}
 	}
 
 	s.bits = (s.bits << uint(n)) | bits

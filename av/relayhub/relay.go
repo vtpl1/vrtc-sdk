@@ -11,6 +11,9 @@ import (
 	"github.com/vtpl1/vrtc-sdk/av"
 )
 
+// Relay manages one demuxer source and fans its decoded packets out to
+// registered consumers. It is created on-demand by RelayHub and reclaimed
+// automatically when its consumer count drops to zero.
 type Relay struct {
 	id             string
 	demuxerFactory av.DemuxerFactory
@@ -39,6 +42,8 @@ type Relay struct {
 	startedAt      time.Time    // set once in Start; zero until Start is called
 }
 
+// NewRelay creates a Relay for the given sourceID. Start must be called to
+// begin reading packets from the demuxer.
 func NewRelay(
 	sourceID string,
 	demuxerFactory av.DemuxerFactory,
@@ -55,6 +60,8 @@ func NewRelay(
 	return m
 }
 
+// Start opens the demuxer and begins the packet read/write loop. It must be
+// called exactly once. A second call returns ErrRelayAlreadyStarted.
 func (m *Relay) Start(ctx context.Context) error {
 	if !m.started.CompareAndSwap(false, true) {
 		return ErrRelayAlreadyStarted
@@ -178,6 +185,8 @@ func (m *Relay) Start(ctx context.Context) error {
 	return nil
 }
 
+// Close cancels the relay's context and waits for all goroutines to exit.
+// Calling Close multiple times is safe; subsequent calls are no-ops.
 func (m *Relay) Close() error {
 	if !m.alreadyClosing.CompareAndSwap(false, true) {
 		return nil
@@ -196,6 +205,8 @@ func (m *Relay) Close() error {
 	return nil
 }
 
+// GetCodecs blocks until the demuxer has produced codec headers or the context
+// is cancelled. Implements av.Demuxer.
 func (m *Relay) GetCodecs(ctx context.Context) ([]av.Stream, error) {
 	select {
 	case <-ctx.Done():
@@ -209,10 +220,12 @@ func (m *Relay) GetCodecs(ctx context.Context) ([]av.Stream, error) {
 	}
 }
 
+// ReadPacket returns the next packet from the underlying demuxer.
 func (m *Relay) ReadPacket(ctx context.Context) (av.Packet, error) {
 	return m.demuxer.ReadPacket(ctx)
 }
 
+// ConsumerCount returns the number of consumers currently registered on this relay.
 func (m *Relay) ConsumerCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -353,6 +366,8 @@ func (m *Relay) LastError() error {
 	return m.headersErr
 }
 
+// AddConsumer registers a new consumer on this relay, waits for codec headers,
+// and sends WriteHeader to the consumer's muxer.
 func (m *Relay) AddConsumer(
 	ctx context.Context,
 	consumerID string,
@@ -414,6 +429,7 @@ func (m *Relay) AddConsumer(
 	return c.WriteHeader(ctx, streams)
 }
 
+// RemoveConsumer deregisters the consumer with the given ID and closes it.
 func (m *Relay) RemoveConsumer(_ context.Context, consumerID string) error {
 	m.mu.Lock()
 
@@ -430,6 +446,8 @@ func (m *Relay) RemoveConsumer(_ context.Context, consumerID string) error {
 	return nil
 }
 
+// Pause forwards a pause request to the underlying demuxer if it implements
+// av.Pauser. Otherwise it is a no-op.
 func (m *Relay) Pause(ctx context.Context) error {
 	m.mu.RLock()
 	dmx := m.demuxer
@@ -442,6 +460,8 @@ func (m *Relay) Pause(ctx context.Context) error {
 	return nil
 }
 
+// Resume forwards a resume request to the underlying demuxer if it implements
+// av.Pauser. Otherwise it is a no-op.
 func (m *Relay) Resume(ctx context.Context) error {
 	m.mu.RLock()
 	dmx := m.demuxer

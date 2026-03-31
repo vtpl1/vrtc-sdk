@@ -1,3 +1,9 @@
+// Package relayhub provides the canonical implementation of av.RelayHub: a
+// fan-out coordinator that manages a set of demuxer relays and their downstream
+// muxer consumers.
+//
+// See av.RelayHub for the full interface contract, including lifecycle rules and
+// delivery-policy details.
 package relayhub
 
 import (
@@ -16,6 +22,7 @@ import (
 // consumer IDs when the caller does not supply one.
 var consumerSeq atomic.Uint64 //nolint:gochecknoglobals
 
+// RelayHub is the concrete implementation of av.RelayHub. Use New to create one.
 type RelayHub struct {
 	demuxerFactory av.DemuxerFactory
 	demuxerRemover av.DemuxerRemover
@@ -37,6 +44,8 @@ type consumerHandle struct {
 	closed     atomic.Bool
 }
 
+// New creates a RelayHub backed by the given demuxer factory and optional
+// remover. Call Start before attaching consumers via Consume.
 func New(
 	demuxerFactory av.DemuxerFactory,
 	demuxerRemover av.DemuxerRemover,
@@ -68,6 +77,7 @@ func (h *consumerHandle) Close(ctx context.Context) error {
 	return err
 }
 
+// Consume implements av.RelayHub.
 func (m *RelayHub) Consume(
 	ctx context.Context,
 	sourceID string,
@@ -155,6 +165,7 @@ func (m *RelayHub) removeConsumer(
 	return p.RemoveConsumer(ctx, consumerID)
 }
 
+// GetActiveRelayCount implements av.RelayHub.
 func (m *RelayHub) GetActiveRelayCount(_ context.Context) int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -162,6 +173,7 @@ func (m *RelayHub) GetActiveRelayCount(_ context.Context) int {
 	return len(m.relays)
 }
 
+// GetRelayStats implements av.RelayHub.
 func (m *RelayHub) GetRelayStats(_ context.Context) []av.RelayStats {
 	m.mu.RLock()
 	stats := make([]av.RelayStats, 0, len(m.relays))
@@ -175,6 +187,7 @@ func (m *RelayHub) GetRelayStats(_ context.Context) []av.RelayStats {
 	return stats
 }
 
+// PauseRelay implements av.RelayHub.
 func (m *RelayHub) PauseRelay(ctx context.Context, sourceID string) error {
 	m.mu.RLock()
 	p, ok := m.relays[sourceID]
@@ -187,6 +200,7 @@ func (m *RelayHub) PauseRelay(ctx context.Context, sourceID string) error {
 	return p.Pause(ctx)
 }
 
+// ResumeRelay implements av.RelayHub.
 func (m *RelayHub) ResumeRelay(ctx context.Context, sourceID string) error {
 	m.mu.RLock()
 	p, ok := m.relays[sourceID]
@@ -199,6 +213,8 @@ func (m *RelayHub) ResumeRelay(ctx context.Context, sourceID string) error {
 	return p.Resume(ctx)
 }
 
+// Start launches the background goroutine that manages relay creation, idle
+// cleanup, and context propagation. It must be called exactly once before Consume.
 func (m *RelayHub) Start(ctx context.Context) error {
 	if !m.started.CompareAndSwap(false, true) {
 		return ErrRelayHubAlreadyStarted
@@ -274,6 +290,8 @@ func (m *RelayHub) Start(ctx context.Context) error {
 	return nil
 }
 
+// SignalStop cancels the hub's context without waiting for goroutines to exit.
+// Returns true on the first call, false on subsequent calls.
 func (m *RelayHub) SignalStop() bool {
 	if !m.alreadyClosing.CompareAndSwap(false, true) {
 		return false
@@ -290,12 +308,15 @@ func (m *RelayHub) SignalStop() bool {
 	return true
 }
 
+// WaitStop blocks until all background goroutines have exited.
 func (m *RelayHub) WaitStop() error {
 	m.wg.Wait()
 
 	return nil
 }
 
+// Stop signals shutdown and blocks until all relays and consumers have exited.
+// Calling Stop multiple times is safe; all calls after the first return nil immediately.
 func (m *RelayHub) Stop() error {
 	if !m.SignalStop() {
 		return nil

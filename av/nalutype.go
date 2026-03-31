@@ -6,9 +6,20 @@ import "fmt"
 // (ITU-T H.264 §7.4.1: nal_unit_type occupies bits [4:0]).
 const H264NALTypeMask H264NaluType = 0x1F
 
-// H265NALTypeMask extracts the 6-bit nal_unit_type after a >>1 shift of the first byte of an
-// H.265 NAL header (ITU-T H.265 §7.4.2.2: nal_unit_type occupies bits [14:9] of the 2-byte header;
-// bits [6:1] of the first byte after the forbidden_zero_bit).
+// H265NALTypeMask extracts the 6-bit nal_unit_type from the first byte of an H.265 NAL header.
+//
+// The H.265 2-byte NAL unit header (ITU-T H.265 §7.4.2.2) is laid out MSB-first as:
+//
+//	bit 15:     forbidden_zero_bit
+//	bits 14–9:  nal_unit_type      (6 bits)
+//	bits  8–3:  nuh_layer_id       (6 bits)
+//	bits  2–0:  nuh_temporal_id_plus1 (3 bits)
+//
+// In the first byte (bits 15–8 of the header word), nal_unit_type occupies bits 6–1
+// (where bit 7 = forbidden_zero_bit, bit 0 = nuh_layer_id[5]).
+// Right-shifting the first byte by 1 moves nal_unit_type into bits 5–0, after which
+// masking with 0x3F isolates all 6 bits.
+// Extract with: H265NaluType(header[0]>>1) & H265NALTypeMask.
 const H265NALTypeMask H265NaluType = 0x3F
 
 // H264NaluType is the 5-bit NAL unit type from an H.264 NAL header byte.

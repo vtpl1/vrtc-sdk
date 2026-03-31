@@ -80,8 +80,8 @@ func FLACHeader(magic bool, sampleRate uint32) []byte {
 	// Important for Apple QuickTime player:
 	// 1. Both values should be same
 	// 2. Maximum value = 32768
-	binary.BigEndian.PutUint16(b[8:], 32768)  // [8..9] info.BlockSizeMin=16 (16 bit)
-	binary.BigEndian.PutUint16(b[10:], 32768) // [10..11] info.BlockSizeMin=65535 (16 bit)
+	binary.BigEndian.PutUint16(b[8:], 32768)  // [8..9] info.BlockSizeMin=32768 (16 bit)
+	binary.BigEndian.PutUint16(b[10:], 32768) // [10..11] info.BlockSizeMax=32768 (16 bit)
 
 	// [12..14] info.FrameSizeMin=0 (24 bit)
 	// [15..17] info.FrameSizeMax=0 (24 bit)
@@ -104,7 +104,6 @@ var (
 	table16 *crc16.Table //nolint:gochecknoglobals
 )
 
-//nolint:funlen
 func FLACEncoder(codecName av.CodecType, clockRate uint32) func([]byte) []byte {
 	var sr byte
 

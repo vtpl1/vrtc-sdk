@@ -10,6 +10,9 @@ import (
 	"github.com/vtpl1/vrtc-sdk/av"
 )
 
+// Consumer buffers packets received from a Relay and drives an av.Muxer in a
+// dedicated goroutine. It is created by Relay.AddConsumer and is not intended
+// for direct use by callers outside the relayhub package.
 type Consumer struct {
 	id           string
 	muxerFactory av.MuxerFactory
@@ -33,6 +36,8 @@ type Consumer struct {
 	packets          chan av.Packet
 }
 
+// NewConsumer creates a Consumer for the given consumerID. Start must be called
+// before any packets can be delivered.
 func NewConsumer(
 	consumerID string,
 	muxerFactory av.MuxerFactory,
@@ -51,6 +56,8 @@ func NewConsumer(
 	return m
 }
 
+// Start launches the goroutine that opens the muxer and delivers packets.
+// It must be called exactly once; a second call returns ErrConsumerAlreadyStarted.
 func (m *Consumer) Start(ctx context.Context) error {
 	if !m.started.CompareAndSwap(false, true) {
 		return ErrConsumerAlreadyStarted
@@ -156,6 +163,8 @@ func (m *Consumer) Start(ctx context.Context) error {
 	return nil
 }
 
+// Close marks the consumer inactive, cancels its context, and waits for the
+// mux goroutine to exit. Calling Close multiple times is safe.
 func (m *Consumer) Close() error {
 	if !m.alreadyClosing.CompareAndSwap(false, true) {
 		return nil
@@ -258,6 +267,8 @@ func (m *Consumer) LastError() error {
 	return m.headersErr
 }
 
+// Inactive reports whether the consumer has stopped processing packets, either
+// because it was closed or because its muxer reported an error.
 func (m *Consumer) Inactive() bool {
 	return m.inactive.Load()
 }

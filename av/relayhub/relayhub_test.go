@@ -28,7 +28,7 @@ func TestNew(t *testing.T) {
 	sm.Start(ctx)
 
 	if sm == nil {
-		t.Fatal("expected non-nil StreamManager")
+		t.Fatal("expected non-nil RelayHub")
 	}
 
 	if sm.GetActiveRelayCount(ctx) != 0 {

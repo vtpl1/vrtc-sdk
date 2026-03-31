@@ -1,3 +1,8 @@
+// Package parser provides utilities for detecting and converting between NALU
+// bitstream formats: raw, Annex B (start-code-delimited, ISO 14496-10 §B.1),
+// and AVCC / ISO BMFF (4-byte big-endian length-prefixed, ISO 14496-15 §5.3).
+//
+// The primary entry points are SplitNALUs, AnnexBToAVCC, and AVCCToAnnexB.
 package parser
 
 import (
@@ -6,19 +11,25 @@ import (
 	"github.com/vtpl1/vrtc-sdk/av/utils/bits/pio"
 )
 
+// Annex B start codes used to delimit NAL units in a byte stream.
 var (
-	StartCode3 = []byte{0x00, 0x00, 0x01}       //nolint:gochecknoglobals
-	StartCode4 = []byte{0x00, 0x00, 0x00, 0x01} //nolint:gochecknoglobals
-	// StartCodes is retained for clarity or potential external use, though not directly used in the optimized lenStartCode.
-	StartCodes = [][]byte{StartCode3, StartCode4} //nolint:gochecknoglobals
+	StartCode3 = []byte{0x00, 0x00, 0x01} //nolint:gochecknoglobals // 3-byte start code
+	StartCode4 = []byte{
+		0x00,
+		0x00,
+		0x00,
+		0x01,
+	} //nolint:gochecknoglobals // 4-byte start code (preferred)
+	StartCodes = [][]byte{StartCode3, StartCode4} //nolint:gochecknoglobals // all known start codes
 )
 
+// NALUAvccOrAnnexb identifies the framing format of a NALU bitstream.
 type NALUAvccOrAnnexb int
 
 const (
-	NALURaw NALUAvccOrAnnexb = iota
-	NALUAvcc
-	NALUAnnexb
+	NALURaw    NALUAvccOrAnnexb = iota // unrecognised or plain raw NALU bytes
+	NALUAvcc                           // AVCC / ISO BMFF length-prefixed format
+	NALUAnnexb                         // Annex B start-code-delimited format
 )
 
 // -----------------------------
@@ -42,6 +53,8 @@ func hasAnnexBStartCode(data []byte) bool {
 	return lenStartCode(data) > 0
 }
 
+// IsAnnexBOrAVCC heuristically detects whether data is Annex B, AVCC, or raw.
+// A minimum of 4 bytes is required; shorter slices return NALURaw.
 func IsAnnexBOrAVCC(data []byte) NALUAvccOrAnnexb {
 	if len(data) < 4 {
 		return NALURaw
@@ -159,6 +172,11 @@ func SplitNALUs(b []byte) ([][]byte, NALUAvccOrAnnexb) {
 	return [][]byte{b}, NALURaw
 }
 
+// FindNextAnnexBNALUnit locates the next NAL unit in an Annex B byte stream
+// beginning at byte offset start. It returns the byte range [nalStart, nalEnd)
+// of the NALU payload (after the start code). Both values are -1 if no start
+// code is found.
+//
 //nolint:nonamedreturns
 func FindNextAnnexBNALUnit(data []byte, start int) (nalStart, nalEnd int) {
 	nalStart = -1
@@ -192,6 +210,9 @@ func FindNextAnnexBNALUnit(data []byte, start int) (nalStart, nalEnd int) {
 	return nalStart, nalEnd
 }
 
+// AnnexBToAVCC converts an Annex B byte stream to AVCC (4-byte length-prefixed)
+// format. Each start-code-delimited NALU is replaced by its big-endian uint32
+// length followed by the NALU payload.
 func AnnexBToAVCC(data []byte) ([]byte, error) {
 	var output []byte
 
@@ -217,6 +238,8 @@ func AnnexBToAVCC(data []byte) ([]byte, error) {
 	return output, nil
 }
 
+// AVCCToAnnexB converts AVCC (4-byte length-prefixed) data to Annex B format,
+// prepending each NALU with a 4-byte start code (0x00 0x00 0x00 0x01).
 func AVCCToAnnexB(data []byte) ([]byte, error) {
 	var output []byte
 

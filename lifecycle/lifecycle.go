@@ -1,3 +1,10 @@
+// Package lifecycle provides interfaces and helpers for managing the start/stop
+// lifecycle of long-running service components.
+//
+// The core interfaces (SignalStopper, Stopper, StartStopper) establish a
+// conventional two-phase shutdown model: signal first, wait separately. This
+// allows callers to fan out shutdown across multiple components before blocking
+// on any of them.
 package lifecycle
 
 import (
