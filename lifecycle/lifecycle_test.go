@@ -59,4 +59,3 @@ func TestWaitForTerminationRequestReturnsOnErrChanClose(t *testing.T) {
 		t.Fatal("WaitForTerminationRequest did not return after errChan close")
 	}
 }
-

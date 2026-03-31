@@ -131,7 +131,7 @@ func TestVecSlicePanics(t *testing.T) {
 
 	in := [][]byte{{0, 1}, {2, 3, 4}, {5}}
 
-	assertPanics(t, func() { _ = VecSlice(in, 4, 3) })  // start > end
+	assertPanics(t, func() { _ = VecSlice(in, 4, 3) })   // start > end
 	assertPanics(t, func() { _ = VecSlice(in, 99, -1) }) // start out of range
 	assertPanics(t, func() { _ = VecSlice(in, 0, 99) })  // end out of range
 }
@@ -153,4 +153,3 @@ func assertPanics(t *testing.T, fn func()) {
 	}()
 	fn()
 }
-

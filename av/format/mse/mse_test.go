@@ -62,7 +62,7 @@ type taggedCodec struct {
 }
 
 func (c taggedCodec) Type() av.CodecType { return c.codecType }
-func (c taggedCodec) Tag() string         { return c.tag }
+func (c taggedCodec) Tag() string        { return c.tag }
 
 func TestTranscodePCM(t *testing.T) {
 	t.Parallel()

@@ -3,6 +3,7 @@ package pcm
 import (
 	"encoding/binary"
 	"errors"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -100,9 +101,17 @@ func FLACHeader(magic bool, sampleRate uint32) []byte {
 }
 
 var (
-	table8  *crc8.Table  //nolint:gochecknoglobals
-	table16 *crc16.Table //nolint:gochecknoglobals
+	flacCRCOnce sync.Once    //nolint:gochecknoglobals
+	table8      *crc8.Table  //nolint:gochecknoglobals
+	table16     *crc16.Table //nolint:gochecknoglobals
 )
+
+func initCRCTables() {
+	flacCRCOnce.Do(func() {
+		table8 = crc8.MakeTable(crc8.CRC8)
+		table16 = crc16.MakeTable(crc16.CRC16_BUYPASS)
+	})
+}
 
 func FLACEncoder(codecName av.CodecType, clockRate uint32) func([]byte) []byte {
 	var sr byte
@@ -128,13 +137,7 @@ func FLACEncoder(codecName av.CodecType, clockRate uint32) func([]byte) []byte {
 		return nil
 	}
 
-	if table8 == nil {
-		table8 = crc8.MakeTable(crc8.CRC8)
-	}
-
-	if table16 == nil {
-		table16 = crc16.MakeTable(crc16.CRC16_BUYPASS)
-	}
+	initCRCTables()
 
 	var sampleNumber int32
 

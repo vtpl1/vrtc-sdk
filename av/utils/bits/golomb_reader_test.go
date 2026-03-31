@@ -122,4 +122,3 @@ func TestGolombReadBitEOF(t *testing.T) {
 		t.Fatalf("ReadBit on empty stream: got %v, want EOF", err)
 	}
 }
-

@@ -66,10 +66,10 @@ func TestSampleFormatHelpers(t *testing.T) {
 	t.Parallel()
 
 	type sfCase struct {
-		sf      SampleFormat
-		bytes   int
-		name    string
-		planar  bool
+		sf     SampleFormat
+		bytes  int
+		name   string
+		planar bool
 	}
 
 	cases := []sfCase{
@@ -232,9 +232,9 @@ func TestFrameAnalyticsString(t *testing.T) {
 	}
 
 	a := &FrameAnalytics{
-		SiteID:      1,
-		ChannelID:   2,
-		FramePTS:    3,
+		SiteID:       1,
+		ChannelID:    2,
+		FramePTS:     3,
 		VehicleCount: 1,
 		PeopleCount:  2,
 		Objects: []*Detection{{
@@ -394,4 +394,3 @@ func mustContain(t *testing.T, s, sub string) {
 		t.Fatalf("expected %q to contain %q", s, sub)
 	}
 }
-

@@ -6,6 +6,8 @@ require (
 	github.com/pion/sdp/v3 v3.0.18
 	github.com/sigurn/crc16 v0.0.0-20240131213347-83fcde1e29d1
 	github.com/sigurn/crc8 v0.0.0-20220107193325-2243fe600f9f
+	google.golang.org/grpc v1.79.3
+	google.golang.org/protobuf v1.36.11
 )
 
 require (
@@ -204,11 +206,12 @@ require (
 	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546 // indirect
 	golang.org/x/exp/typeparams v0.0.0-20260209203927-2842357ff358 // indirect
 	golang.org/x/mod v0.34.0 // indirect
+	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
 	golang.org/x/tools v0.43.0 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260330182312-d5a96adf58d8 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	honnef.co/go/tools v0.7.0 // indirect
 	mvdan.cc/gofumpt v0.9.2 // indirect

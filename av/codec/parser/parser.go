@@ -13,13 +13,8 @@ import (
 
 // Annex B start codes used to delimit NAL units in a byte stream.
 var (
-	StartCode3 = []byte{0x00, 0x00, 0x01} //nolint:gochecknoglobals // 3-byte start code
-	StartCode4 = []byte{
-		0x00,
-		0x00,
-		0x00,
-		0x01,
-	} //nolint:gochecknoglobals // 4-byte start code (preferred)
+	StartCode3 = []byte{0x00, 0x00, 0x01}         //nolint:gochecknoglobals // 3-byte start code
+	StartCode4 = []byte{0x00, 0x00, 0x00, 0x01}   //nolint:gochecknoglobals // 4-byte start code
 	StartCodes = [][]byte{StartCode3, StartCode4} //nolint:gochecknoglobals // all known start codes
 )
 

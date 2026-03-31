@@ -3,6 +3,7 @@
 A Go library for building audio/video pipelines. It provides the core data model, codec utilities, container formats, and a fan-out relay hub used by the `vrtc` edge and recording services.
 
 **Module:** `github.com/vtpl1/vrtc-sdk`  
+**Version:** v0.1.0  
 **Go version:** 1.26+
 
 ---
@@ -21,6 +22,7 @@ A Go library for building audio/video pipelines. It provides the core data model
 | `av/codec` | SDP → `[]CodecData` parsing; Opus codec data |
 | `av/format/fmp4` | Fragmented MP4 (ISO 14496-12) muxer and demuxer |
 | `av/format/mp4` | Standard MP4 muxer and demuxer |
+| `av/format/grpc` | gRPC transport: PushStream (client→server) and PullStream (server→client) with pause/seek |
 | `av/format/llhls` | Low-Latency HLS (CMAF) muxer with built-in HTTP handler |
 | `av/format/mse` | fMP4-over-WebSocket muxer for browser Media Source Extensions |
 | `lifecycle` | `StartStopper` / `Stopper` interfaces and signal helpers |
@@ -157,6 +159,39 @@ mux.WriteTrailer(ctx, nil)
 
 The demuxer reads standard fMP4 files and CMAF streams produced by this muxer.
 
+### gRPC transport (`av/format/grpc`)
+
+Bidirectional streaming transport for AV packets between vrtc nodes over gRPC. The `AVTransportService` defines two streaming RPCs plus control RPCs:
+
+| RPC | Direction | Purpose |
+|-----|-----------|---------|
+| `PushStream` | client → server | Edge pushes packets to cloud (client-streaming) |
+| `PullStream` | server → client | Consumer pulls packets from cloud (server-streaming) |
+| `PauseStream` / `ResumeStream` | unary | Pause/resume packet delivery |
+| `SeekStream` | unary | Seek to a keyframe-aligned position |
+
+```go
+// Server side — register with a gRPC server
+srv := avgrpc.NewServer(demuxerFactory, demuxerRemover)
+avtransportv1.RegisterAVTransportServiceServer(grpcServer, srv)
+
+// Client side — push packets to a remote server
+mux, _ := avgrpc.NewClientMuxer(ctx, conn, "rtsp://camera-1/stream")
+mux.WriteHeader(ctx, streams)
+// ... WritePacket loop ...
+mux.WriteTrailer(ctx, nil)
+
+// Client side — pull packets from a remote server
+dmx, _ := avgrpc.NewClientDemuxer(ctx, conn, "rtsp://camera-1/stream")
+streams, _ := dmx.GetCodecs(ctx)
+for {
+    pkt, err := dmx.ReadPacket(ctx)
+    // ...
+}
+```
+
+`ClientDemuxer` also implements `av.Pauser` and `av.TimeSeeker` via the control RPCs.
+
 ### Low-Latency HLS (`av/format/llhls`)
 
 Packages media as CMAF parts and serves an LL-HLS playlist over HTTP.
@@ -233,7 +268,7 @@ This module is consumed by `github.com/vtpl1/vrtc` via a Go workspace. The
 use ./vrtc-sdk
 use ./vrtc
 
-replace github.com/vtpl1/vrtc-sdk v0.0.0 => ./vrtc-sdk
+replace github.com/vtpl1/vrtc-sdk v0.1.0 => ./vrtc-sdk
 ```
 
-The `replace` directive is required because the module is not yet published at `v0.0.0`.
+The `replace` directive is required because the module is not yet published at `v0.1.0`.

@@ -171,4 +171,3 @@ func TestReadBits64ShortReadAndUnderlyingError(t *testing.T) {
 		t.Fatalf("expected underlying error, got %v", err)
 	}
 }
-

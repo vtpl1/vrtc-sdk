@@ -1,0 +1,158 @@
+syntax = "proto3";
+
+package avtransport.v1;
+
+option go_package = "github.com/vtpl1/vrtc-sdk/av/format/grpc/gen/avtransportv1";
+
+// AVTransportService streams compressed audio/video packets between vrtc nodes.
+service AVTransportService {
+  // PushStream: edge pushes a live stream to cloud (client-streaming).
+  // The client sends a StreamHeader first, then AVPackets, then a StreamTrailer.
+  rpc PushStream(stream PushStreamRequest) returns (PushStreamResponse);
+
+  // PullStream: consumer pulls a live stream from cloud (server-streaming).
+  // The server sends a StreamHeader first, then AVPackets, then a StreamTrailer.
+  rpc PullStream(PullStreamRequest) returns (stream PullStreamResponse);
+
+  // PauseStream pauses packet delivery for the given source.
+  rpc PauseStream(PauseStreamRequest) returns (PauseStreamResponse);
+
+  // ResumeStream resumes packet delivery for the given source.
+  rpc ResumeStream(ResumeStreamRequest) returns (ResumeStreamResponse);
+
+  // SeekStream seeks to a position within a seekable source.
+  rpc SeekStream(SeekStreamRequest) returns (SeekStreamResponse);
+}
+
+// ── Push (client-streaming: edge → cloud) ────────────────────
+
+message PushStreamRequest {
+  string source_id = 1;
+  oneof payload {
+    StreamHeader header = 2;
+    AVPacket packet = 3;
+    StreamTrailer trailer = 4;
+  }
+}
+
+message PushStreamResponse {
+  string error = 1;
+}
+
+// ── Pull (server-streaming: cloud → consumer) ────────────────
+
+message PullStreamRequest {
+  string source_id = 1;
+  string consumer_id = 2;
+}
+
+message PullStreamResponse {
+  oneof payload {
+    StreamHeader header = 1;
+    AVPacket packet = 2;
+    StreamTrailer trailer = 3;
+  }
+}
+
+// ── Control RPCs ─────────────────────────────────────────────
+
+message PauseStreamRequest {
+  string source_id = 1;
+}
+
+message PauseStreamResponse {}
+
+message ResumeStreamRequest {
+  string source_id = 1;
+}
+
+message ResumeStreamResponse {}
+
+message SeekStreamRequest {
+  string source_id = 1;
+  // Desired position as nanoseconds from stream start (matches Packet.DTS).
+  int64 position_ns = 2;
+}
+
+message SeekStreamResponse {
+  // Actual position landed on (may differ due to keyframe alignment).
+  int64 actual_position_ns = 1;
+}
+
+// ── Shared types ─────────────────────────────────────────────
+
+message StreamHeader {
+  repeated StreamInfo streams = 1;
+}
+
+message StreamTrailer {
+  string error = 1;
+}
+
+message StreamInfo {
+  uint32 idx = 1;
+  uint32 codec_type = 2;
+  oneof codec_config {
+    VideoCodecConfig video = 3;
+    AudioCodecConfig audio = 4;
+  }
+}
+
+message VideoCodecConfig {
+  int32 width = 1;
+  int32 height = 2;
+  uint32 time_scale = 3;
+  // Raw decoder configuration record: avcC for H.264, hvcC for H.265.
+  bytes config_record = 4;
+}
+
+message AudioCodecConfig {
+  uint32 sample_format = 1;
+  int32 sample_rate = 2;
+  uint32 channel_layout = 3;
+  // Raw codec config: MPEG4AudioConfig for AAC; empty for OPUS/PCM variants.
+  bytes config_bytes = 4;
+}
+
+message AVPacket {
+  bool key_frame = 1;
+  bool is_discontinuity = 2;
+  uint32 idx = 3;
+  uint32 codec_type = 4;
+  int64 frame_id = 5;
+  // Timestamps as nanoseconds (native Go time.Duration representation).
+  int64 dts_ns = 6;
+  int64 pts_offset_ns = 7;
+  int64 duration_ns = 8;
+  // Wall-clock time as UnixNano; 0 means not set.
+  int64 wall_clock_ns = 9;
+  bytes data = 10;
+  FrameAnalytics analytics = 11;
+  // Non-empty on a keyframe that follows a codec parameter-set change.
+  repeated StreamInfo new_codecs = 12;
+}
+
+message FrameAnalytics {
+  int32 site_id = 1;
+  int32 channel_id = 2;
+  int64 frame_pts = 3;
+  int64 capture_ms = 4;
+  int64 capture_end_ms = 5;
+  int64 inference_ms = 6;
+  int32 ref_width = 7;
+  int32 ref_height = 8;
+  int32 vehicle_count = 9;
+  int32 people_count = 10;
+  repeated Detection objects = 11;
+}
+
+message Detection {
+  uint32 x = 1;
+  uint32 y = 2;
+  uint32 w = 3;
+  uint32 h = 4;
+  uint32 class_id = 5;
+  uint32 confidence = 6;
+  int64 track_id = 7;
+  bool is_event = 8;
+}
