@@ -379,6 +379,30 @@ type CodecData struct {
 	Config      MPEG4AudioConfig
 }
 
+func NewCodecDataFromMPEG4AudioConfig(config MPEG4AudioConfig) (CodecData, error) {
+	var b bytes.Buffer
+
+	_ = WriteMPEG4AudioConfig(&b, config)
+
+	return NewCodecDataFromMPEG4AudioConfigBytes(b.Bytes())
+}
+
+func NewCodecDataFromMPEG4AudioConfigBytes(config []byte) (CodecData, error) {
+	var s CodecData
+
+	var err error
+
+	s.ConfigBytes = config
+
+	if s.Config, err = ParseMPEG4AudioConfigBytes(config); err != nil {
+		err = ErrAACparserMPEG4AudioConfigFailed
+
+		return s, err
+	}
+
+	return s, err
+}
+
 func (s CodecData) Type() av.CodecType {
 	return av.AAC
 }
@@ -417,30 +441,6 @@ func (s CodecData) PacketDuration(_ []byte) (time.Duration, error) {
 	}
 
 	return time.Second * 1024 / time.Duration(s.Config.SampleRate), nil
-}
-
-func NewCodecDataFromMPEG4AudioConfig(config MPEG4AudioConfig) (CodecData, error) {
-	var b bytes.Buffer
-
-	_ = WriteMPEG4AudioConfig(&b, config)
-
-	return NewCodecDataFromMPEG4AudioConfigBytes(b.Bytes())
-}
-
-func NewCodecDataFromMPEG4AudioConfigBytes(config []byte) (CodecData, error) {
-	var s CodecData
-
-	var err error
-
-	s.ConfigBytes = config
-
-	if s.Config, err = ParseMPEG4AudioConfigBytes(config); err != nil {
-		err = ErrAACparserMPEG4AudioConfigFailed
-
-		return s, err
-	}
-
-	return s, err
 }
 
 func ExtractADTSFrame(frame []byte) (

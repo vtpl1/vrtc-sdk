@@ -42,31 +42,6 @@ func newServerDemuxer(sourceID string, bufSize int) *ServerDemuxer {
 	}
 }
 
-// updateCodecs replaces the codec list for mid-stream codec changes.
-func (d *ServerDemuxer) updateCodecs(streams []av.Stream) {
-	d.codecsMu.Lock()
-	d.codecs = streams
-	d.codecsMu.Unlock()
-}
-
-// setCodecsAndSignal sets the initial codecs and unblocks GetCodecs.
-// Must be called exactly once.
-func (d *ServerDemuxer) setCodecsAndSignal(streams []av.Stream) {
-	d.codecsMu.Lock()
-	d.codecs = streams
-	d.codecsMu.Unlock()
-	close(d.codecsCh)
-}
-
-// setError records a terminal error.
-func (d *ServerDemuxer) setError(err error) {
-	d.errMu.Lock()
-	if d.err == nil {
-		d.err = err
-	}
-	d.errMu.Unlock()
-}
-
 // GetCodecs blocks until the remote client sends the StreamHeader.
 func (d *ServerDemuxer) GetCodecs(ctx context.Context) ([]av.Stream, error) {
 	select {
@@ -171,4 +146,29 @@ func (d *ServerDemuxer) Close() error {
 	}
 
 	return nil
+}
+
+// updateCodecs replaces the codec list for mid-stream codec changes.
+func (d *ServerDemuxer) updateCodecs(streams []av.Stream) {
+	d.codecsMu.Lock()
+	d.codecs = streams
+	d.codecsMu.Unlock()
+}
+
+// setCodecsAndSignal sets the initial codecs and unblocks GetCodecs.
+// Must be called exactly once.
+func (d *ServerDemuxer) setCodecsAndSignal(streams []av.Stream) {
+	d.codecsMu.Lock()
+	d.codecs = streams
+	d.codecsMu.Unlock()
+	close(d.codecsCh)
+}
+
+// setError records a terminal error.
+func (d *ServerDemuxer) setError(err error) {
+	d.errMu.Lock()
+	if d.err == nil {
+		d.err = err
+	}
+	d.errMu.Unlock()
 }

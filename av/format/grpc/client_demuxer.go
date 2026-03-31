@@ -130,21 +130,6 @@ func (d *ClientDemuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 	}
 }
 
-func (d *ClientDemuxer) decodeResponse(resp *pb.PullStreamResponse) (av.Packet, error) {
-	switch p := resp.GetPayload().(type) {
-	case *pb.PullStreamResponse_Packet:
-		return unmarshalPacket(p.Packet)
-	case *pb.PullStreamResponse_Trailer:
-		if p.Trailer.GetError() != "" {
-			return av.Packet{}, fmt.Errorf("%w: %s", errRemoteError, p.Trailer.GetError())
-		}
-
-		return av.Packet{}, io.EOF
-	default:
-		return av.Packet{}, fmt.Errorf("%w: %T", errUnexpectedPayload, resp.GetPayload())
-	}
-}
-
 // Pause implements av.Pauser. Sends a PauseStream RPC to the server.
 func (d *ClientDemuxer) Pause(ctx context.Context) error {
 	client := pb.NewAVTransportServiceClient(d.conn)
@@ -202,4 +187,19 @@ func (d *ClientDemuxer) Close() error {
 	}
 
 	return nil
+}
+
+func (d *ClientDemuxer) decodeResponse(resp *pb.PullStreamResponse) (av.Packet, error) {
+	switch p := resp.GetPayload().(type) {
+	case *pb.PullStreamResponse_Packet:
+		return unmarshalPacket(p.Packet)
+	case *pb.PullStreamResponse_Trailer:
+		if p.Trailer.GetError() != "" {
+			return av.Packet{}, fmt.Errorf("%w: %s", errRemoteError, p.Trailer.GetError())
+		}
+
+		return av.Packet{}, io.EOF
+	default:
+		return av.Packet{}, fmt.Errorf("%w: %T", errUnexpectedPayload, resp.GetPayload())
+	}
 }

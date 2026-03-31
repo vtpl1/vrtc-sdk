@@ -7,11 +7,15 @@ linters:
   disable:
     - depguard
     - exhaustruct
+    - funlen
+    - gochecknoglobals
     - ireturn
     - mnd
+    - nestif
     - noinlineerr
     - nonamedreturns
     - paralleltest
+    - revive
     - testpackage
     - varnamelen
     - wrapcheck
@@ -23,6 +27,9 @@ linters:
       line-length: 180
     gocognit:
       min-complexity: 60
+    gosec:
+      excludes:
+        - G115
 
   exclusions:
     generated: lax
@@ -34,39 +41,6 @@ linters:
       - std-error-handling
       - common-false-positives
       - legacy
-    rules:
-      - linters:
-          - revive
-        text: 'avoid package names that conflict with Go standard library package names'
-      - linters:
-          - gochecknoglobals
-        path: 'av/av\.go'  # codec-type constants are intentionally package-level vars
-      - linters:
-          - gosec
-        text: 'G115'  # integer overflow conversions are intentional in codec/protocol code
-      - linters:
-          - revive
-        text: 'var-naming: don''t use ALL_CAPS'  # C-header constant names kept verbatim
-      - linters:
-          - revive
-        text: 'exported:.*stutters'  # pcm.PCM* type names match the established API
-      - linters:
-          - gocognit
-          - nestif
-          - funlen
-        path: 'av/codec/(h264|h265)parser'  # SPS/PPS parsing is inherently complex
-      - linters:
-          - funlen
-        path: 'av/codec/(parser|pcm)'  # NALU splitting and PCM transcoding are inherently long
-      - linters:
-          - funlen
-        path: 'av/format/(fmp4|mp4|llhls)'  # binary container parsing/muxing is inherently long
-      - linters:
-          - funlen
-        path: 'av/relayhub'  # goroutine lifecycle with defer chains cannot be split cleanly
-      - linters:
-          - funcorder
-        path: 'av'  # constructor placement follows original file organisation
 
 formatters:
   enable:

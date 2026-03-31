@@ -142,67 +142,6 @@ func (s *Server) PushStream(stream pb.AVTransportService_PushStreamServer) error
 	return s.pushReadLoop(stream, dmx)
 }
 
-// pushReadLoop reads packets from the client and feeds them into the demuxer channel.
-func (s *Server) pushReadLoop(
-	stream pb.AVTransportService_PushStreamServer,
-	dmx *ServerDemuxer,
-) error {
-	for {
-		msg, recvErr := stream.Recv()
-		if recvErr != nil {
-			if errors.Is(recvErr, io.EOF) {
-				dmx.setError(io.EOF)
-
-				return stream.SendAndClose(&pb.PushStreamResponse{})
-			}
-
-			dmx.setError(recvErr)
-
-			return recvErr
-		}
-
-		switch p := msg.GetPayload().(type) {
-		case *pb.PushStreamRequest_Packet:
-			pkt, unmarshalErr := unmarshalPacket(p.Packet)
-			if unmarshalErr != nil {
-				dmx.setError(unmarshalErr)
-
-				return unmarshalErr
-			}
-
-			select {
-			case <-stream.Context().Done():
-				dmx.setError(stream.Context().Err())
-
-				return stream.Context().Err()
-			case dmx.packets <- pkt:
-			}
-		case *pb.PushStreamRequest_Trailer:
-			if p.Trailer.GetError() != "" {
-				dmx.setError(fmt.Errorf("%w: %s", errRemoteTrailer, p.Trailer.GetError()))
-			} else {
-				dmx.setError(io.EOF)
-			}
-
-			return stream.SendAndClose(&pb.PushStreamResponse{})
-		case *pb.PushStreamRequest_Header:
-			newStreams, unmarshalErr := unmarshalStreams(p.Header.GetStreams())
-			if unmarshalErr != nil {
-				dmx.setError(fmt.Errorf("grpc: unmarshal codec change: %w", unmarshalErr))
-
-				return unmarshalErr
-			}
-
-			dmx.updateCodecs(newStreams)
-		default:
-			err := fmt.Errorf("%w: %T", errUnexpectedPayload, msg.GetPayload())
-			dmx.setError(err)
-
-			return err
-		}
-	}
-}
-
 // PullStream handles a pull subscription from a remote consumer.
 func (s *Server) PullStream(
 	req *pb.PullStreamRequest,
@@ -264,4 +203,65 @@ func (s *Server) SeekStream(
 	}
 
 	return &pb.SeekStreamResponse{ActualPositionNs: int64(actual)}, nil
+}
+
+// pushReadLoop reads packets from the client and feeds them into the demuxer channel.
+func (s *Server) pushReadLoop(
+	stream pb.AVTransportService_PushStreamServer,
+	dmx *ServerDemuxer,
+) error {
+	for {
+		msg, recvErr := stream.Recv()
+		if recvErr != nil {
+			if errors.Is(recvErr, io.EOF) {
+				dmx.setError(io.EOF)
+
+				return stream.SendAndClose(&pb.PushStreamResponse{})
+			}
+
+			dmx.setError(recvErr)
+
+			return recvErr
+		}
+
+		switch p := msg.GetPayload().(type) {
+		case *pb.PushStreamRequest_Packet:
+			pkt, unmarshalErr := unmarshalPacket(p.Packet)
+			if unmarshalErr != nil {
+				dmx.setError(unmarshalErr)
+
+				return unmarshalErr
+			}
+
+			select {
+			case <-stream.Context().Done():
+				dmx.setError(stream.Context().Err())
+
+				return stream.Context().Err()
+			case dmx.packets <- pkt:
+			}
+		case *pb.PushStreamRequest_Trailer:
+			if p.Trailer.GetError() != "" {
+				dmx.setError(fmt.Errorf("%w: %s", errRemoteTrailer, p.Trailer.GetError()))
+			} else {
+				dmx.setError(io.EOF)
+			}
+
+			return stream.SendAndClose(&pb.PushStreamResponse{})
+		case *pb.PushStreamRequest_Header:
+			newStreams, unmarshalErr := unmarshalStreams(p.Header.GetStreams())
+			if unmarshalErr != nil {
+				dmx.setError(fmt.Errorf("grpc: unmarshal codec change: %w", unmarshalErr))
+
+				return unmarshalErr
+			}
+
+			dmx.updateCodecs(newStreams)
+		default:
+			err := fmt.Errorf("%w: %T", errUnexpectedPayload, msg.GetPayload())
+			dmx.setError(err)
+
+			return err
+		}
+	}
 }

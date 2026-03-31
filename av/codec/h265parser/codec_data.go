@@ -19,6 +19,67 @@ type CodecData struct {
 	ControlURL string
 }
 
+// NewCodecDataFromAVCDecoderConfRecord parses an hvcC (HEVC decoder configuration record).
+func NewCodecDataFromAVCDecoderConfRecord(record []byte) (CodecData, error) {
+	var s CodecData
+
+	s.Record = record
+	if _, err := (&s.RecordInfo).Unmarshal(record); err != nil {
+		return s, err
+	}
+
+	if len(s.RecordInfo.SPS) == 0 {
+		return s, ErrSPSNotFound
+	}
+
+	if len(s.RecordInfo.PPS) == 0 {
+		return s, ErrPPSNotFound
+	}
+
+	if len(s.RecordInfo.VPS) == 0 {
+		return s, ErrVPSNotFound
+	}
+
+	var err error
+	if s.SPSInfo, err = ParseSPS(s.RecordInfo.SPS[0]); err != nil {
+		return s, errors.Join(ErrSPSParseFailed, err)
+	}
+
+	return s, nil
+}
+
+// NewCodecDataFromVPSAndSPSAndPPS constructs CodecData from raw VPS/SPS/PPS NALUs.
+func NewCodecDataFromVPSAndSPSAndPPS(vps, sps, pps []byte) (CodecData, error) {
+	var s CodecData
+
+	if len(sps) < 6 {
+		return s, ErrInvalidSPS
+	}
+
+	var err error
+	if s.SPSInfo, err = ParseSPS(sps); err != nil {
+		return s, err
+	}
+
+	recordinfo := HEVCDecoderConfigurationRecord{
+		GeneralProfileIDC:                uint8(s.SPSInfo.generalProfileIDC),
+		GeneralLevelIDC:                  uint8(s.SPSInfo.generalLevelIDC),
+		GeneralTierFlag:                  uint8(s.SPSInfo.generalTierFlag),
+		GeneralProfileCompatibilityFlags: s.SPSInfo.generalProfileCompatibilityFlags,
+		GeneralConstraintIndicatorFlags:  s.SPSInfo.generalConstraintIndicatorFlags,
+		SPS:                              [][]byte{sps},
+		PPS:                              [][]byte{pps},
+		VPS:                              [][]byte{vps},
+		LengthSizeMinusOne:               3,
+	}
+	buf := make([]byte, recordinfo.Len())
+	recordinfo.Marshal(buf, s.SPSInfo)
+	s.RecordInfo = recordinfo
+	s.Record = buf
+
+	return s, nil
+}
+
 func (s CodecData) Type() av.CodecType {
 	return av.H265
 }
@@ -130,67 +191,6 @@ func (s CodecData) ParameterSetsAnnexB() []byte {
 	buf.Write(s.PPS())
 
 	return buf.Bytes()
-}
-
-// NewCodecDataFromAVCDecoderConfRecord parses an hvcC (HEVC decoder configuration record).
-func NewCodecDataFromAVCDecoderConfRecord(record []byte) (CodecData, error) {
-	var s CodecData
-
-	s.Record = record
-	if _, err := (&s.RecordInfo).Unmarshal(record); err != nil {
-		return s, err
-	}
-
-	if len(s.RecordInfo.SPS) == 0 {
-		return s, ErrSPSNotFound
-	}
-
-	if len(s.RecordInfo.PPS) == 0 {
-		return s, ErrPPSNotFound
-	}
-
-	if len(s.RecordInfo.VPS) == 0 {
-		return s, ErrVPSNotFound
-	}
-
-	var err error
-	if s.SPSInfo, err = ParseSPS(s.RecordInfo.SPS[0]); err != nil {
-		return s, errors.Join(ErrSPSParseFailed, err)
-	}
-
-	return s, nil
-}
-
-// NewCodecDataFromVPSAndSPSAndPPS constructs CodecData from raw VPS/SPS/PPS NALUs.
-func NewCodecDataFromVPSAndSPSAndPPS(vps, sps, pps []byte) (CodecData, error) {
-	var s CodecData
-
-	if len(sps) < 6 {
-		return s, ErrInvalidSPS
-	}
-
-	var err error
-	if s.SPSInfo, err = ParseSPS(sps); err != nil {
-		return s, err
-	}
-
-	recordinfo := HEVCDecoderConfigurationRecord{
-		GeneralProfileIDC:                uint8(s.SPSInfo.generalProfileIDC),
-		GeneralLevelIDC:                  uint8(s.SPSInfo.generalLevelIDC),
-		GeneralTierFlag:                  uint8(s.SPSInfo.generalTierFlag),
-		GeneralProfileCompatibilityFlags: s.SPSInfo.generalProfileCompatibilityFlags,
-		GeneralConstraintIndicatorFlags:  s.SPSInfo.generalConstraintIndicatorFlags,
-		SPS:                              [][]byte{sps},
-		PPS:                              [][]byte{pps},
-		VPS:                              [][]byte{vps},
-		LengthSizeMinusOne:               3,
-	}
-	buf := make([]byte, recordinfo.Len())
-	recordinfo.Marshal(buf, s.SPSInfo)
-	s.RecordInfo = recordinfo
-	s.Record = buf
-
-	return s, nil
 }
 
 // HEVCDecoderConfigurationRecord is the hvcC box payload (ISO 14496-15).

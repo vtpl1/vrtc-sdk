@@ -239,6 +239,19 @@ func (m *Consumer) WriteTrailer(_ context.Context, _ error) error {
 	return nil
 }
 
+func (m *Consumer) LastError() error {
+	m.dataMu.RLock()
+	defer m.dataMu.RUnlock()
+
+	return m.headersErr
+}
+
+// Inactive reports whether the consumer has stopped processing packets, either
+// because it was closed or because its muxer reported an error.
+func (m *Consumer) Inactive() bool {
+	return m.inactive.Load()
+}
+
 func (m *Consumer) setLastError(err error) {
 	if err == nil {
 		return
@@ -258,17 +271,4 @@ func (m *Consumer) setLastError(err error) {
 	}
 
 	m.inactive.Store(true)
-}
-
-func (m *Consumer) LastError() error {
-	m.dataMu.RLock()
-	defer m.dataMu.RUnlock()
-
-	return m.headersErr
-}
-
-// Inactive reports whether the consumer has stopped processing packets, either
-// because it was closed or because its muxer reported an error.
-func (m *Consumer) Inactive() bool {
-	return m.inactive.Load()
 }

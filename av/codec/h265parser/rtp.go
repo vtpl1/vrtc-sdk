@@ -41,6 +41,18 @@ func (p *Parser) PushRTP(payload []byte) (*AccessUnit, bool, error) {
 	}
 }
 
+// Flush returns any buffered incomplete access unit.
+func (p *Parser) Flush() *AccessUnit {
+	if len(p.current) == 0 {
+		return nil
+	}
+
+	au := p.buildAU()
+	p.current = nil
+
+	return au
+}
+
 func (p *Parser) parseAP(payload []byte) (*AccessUnit, bool, error) {
 	offset := 2
 
@@ -125,18 +137,6 @@ func (p *Parser) pushNALU(nalu []byte) (*AccessUnit, bool) {
 	p.current = append(p.current, nalu)
 
 	return nil, false
-}
-
-// Flush returns any buffered incomplete access unit.
-func (p *Parser) Flush() *AccessUnit {
-	if len(p.current) == 0 {
-		return nil
-	}
-
-	au := p.buildAU()
-	p.current = nil
-
-	return au
 }
 
 func (p *Parser) buildAU() *AccessUnit {

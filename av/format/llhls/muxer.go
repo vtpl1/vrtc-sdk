@@ -314,6 +314,49 @@ func (m *Muxer) WriteCodecChange(_ context.Context, changed []av.Stream) error {
 	return nil
 }
 
+// ── HTTP handler ──────────────────────────────────────────────────────────────
+
+// Handler returns an http.Handler that serves the LL-HLS stream under prefix.
+// prefix should not have a trailing slash (e.g. "/hls/camera1").
+//
+// Served resources:
+//
+//	{prefix}/index.m3u8        – master playlist (supports blocking reload)
+//	{prefix}/init.mp4          – fMP4 init segment (ftyp+moov)
+//	{prefix}/seg{N}.mp4        – complete segment N
+//	{prefix}/part{N}_{P}.mp4  – part P of segment N
+func (m *Muxer) Handler(prefix string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, prefix)
+		path = strings.TrimPrefix(path, "/")
+
+		switch {
+		case path == "index.m3u8":
+			m.servePlaylist(w, r)
+		case path == "init.mp4":
+			m.serveInit(w, r)
+		case strings.HasPrefix(path, "seg"):
+			m.serveSegment(w, r, path)
+		case strings.HasPrefix(path, "part"):
+			m.servePart(w, r, path)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+func (m *Muxer) serveInit(w http.ResponseWriter, _ *http.Request) {
+	if len(m.initData) == 0 {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+
+		return
+	}
+
+	w.Header().Set("Content-Type", "video/mp4")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(m.initData)
+}
+
 // emitPart flushes the current fMP4 fragment as a new Part.
 // segBoundary signals that a new segment should begin after this part.
 func (m *Muxer) emitPart(nextIsKey bool) {
@@ -381,49 +424,6 @@ func (m *Muxer) finaliseSegment() {
 		Parts:    nil,
 		Data:     nil,
 	}
-}
-
-// ── HTTP handler ──────────────────────────────────────────────────────────────
-
-// Handler returns an http.Handler that serves the LL-HLS stream under prefix.
-// prefix should not have a trailing slash (e.g. "/hls/camera1").
-//
-// Served resources:
-//
-//	{prefix}/index.m3u8        – master playlist (supports blocking reload)
-//	{prefix}/init.mp4          – fMP4 init segment (ftyp+moov)
-//	{prefix}/seg{N}.mp4        – complete segment N
-//	{prefix}/part{N}_{P}.mp4  – part P of segment N
-func (m *Muxer) Handler(prefix string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, prefix)
-		path = strings.TrimPrefix(path, "/")
-
-		switch {
-		case path == "index.m3u8":
-			m.servePlaylist(w, r)
-		case path == "init.mp4":
-			m.serveInit(w, r)
-		case strings.HasPrefix(path, "seg"):
-			m.serveSegment(w, r, path)
-		case strings.HasPrefix(path, "part"):
-			m.servePart(w, r, path)
-		default:
-			http.NotFound(w, r)
-		}
-	})
-}
-
-func (m *Muxer) serveInit(w http.ResponseWriter, _ *http.Request) {
-	if len(m.initData) == 0 {
-		http.Error(w, "not ready", http.StatusServiceUnavailable)
-
-		return
-	}
-
-	w.Header().Set("Content-Type", "video/mp4")
-	w.Header().Set("Cache-Control", "no-cache")
-	_, _ = w.Write(m.initData)
 }
 
 //nolint:nestif

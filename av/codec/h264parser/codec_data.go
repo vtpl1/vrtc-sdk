@@ -18,6 +18,58 @@ type CodecData struct {
 	ControlURL string
 }
 
+// NewCodecDataFromAVCDecoderConfRecord parses an avcC (AVC decoder configuration record).
+func NewCodecDataFromAVCDecoderConfRecord(record []byte) (CodecData, error) {
+	var s CodecData
+
+	s.Record = record
+	if _, err := (&s.RecordInfo).Unmarshal(record); err != nil {
+		return s, err
+	}
+
+	if len(s.RecordInfo.SPS) == 0 {
+		return s, ErrSPSNotFound
+	}
+
+	if len(s.RecordInfo.PPS) == 0 {
+		return s, ErrPPSNotFound
+	}
+
+	var err error
+	if s.SPSInfo, err = ParseSPS(s.RecordInfo.SPS[0]); err != nil {
+		return s, errors.Join(ErrSPSNotFound, err)
+	}
+
+	return s, nil
+}
+
+// NewCodecDataFromSPSAndPPS constructs CodecData from raw SPS and PPS NALUs.
+func NewCodecDataFromSPSAndPPS(sps, pps []byte) (CodecData, error) {
+	var s CodecData
+
+	recordinfo := AVCDecoderConfRecord{
+		AVCProfileIndication: sps[1],
+		ProfileCompatibility: sps[2],
+		AVCLevelIndication:   sps[3],
+		SPS:                  [][]byte{sps},
+		PPS:                  [][]byte{pps},
+		LengthSizeMinusOne:   3,
+	}
+
+	buf := make([]byte, recordinfo.Len())
+	recordinfo.Marshal(buf)
+
+	s.RecordInfo = recordinfo
+	s.Record = buf
+
+	var err error
+	if s.SPSInfo, err = ParseSPS(sps); err != nil {
+		return s, err
+	}
+
+	return s, nil
+}
+
 func (s CodecData) Type() av.CodecType {
 	return av.H264
 }
@@ -100,58 +152,6 @@ func (s CodecData) PacketDuration(_ []byte) time.Duration {
 	}
 
 	return time.Duration(1000./float64(fps)) * time.Millisecond
-}
-
-// NewCodecDataFromAVCDecoderConfRecord parses an avcC (AVC decoder configuration record).
-func NewCodecDataFromAVCDecoderConfRecord(record []byte) (CodecData, error) {
-	var s CodecData
-
-	s.Record = record
-	if _, err := (&s.RecordInfo).Unmarshal(record); err != nil {
-		return s, err
-	}
-
-	if len(s.RecordInfo.SPS) == 0 {
-		return s, ErrSPSNotFound
-	}
-
-	if len(s.RecordInfo.PPS) == 0 {
-		return s, ErrPPSNotFound
-	}
-
-	var err error
-	if s.SPSInfo, err = ParseSPS(s.RecordInfo.SPS[0]); err != nil {
-		return s, errors.Join(ErrSPSNotFound, err)
-	}
-
-	return s, nil
-}
-
-// NewCodecDataFromSPSAndPPS constructs CodecData from raw SPS and PPS NALUs.
-func NewCodecDataFromSPSAndPPS(sps, pps []byte) (CodecData, error) {
-	var s CodecData
-
-	recordinfo := AVCDecoderConfRecord{
-		AVCProfileIndication: sps[1],
-		ProfileCompatibility: sps[2],
-		AVCLevelIndication:   sps[3],
-		SPS:                  [][]byte{sps},
-		PPS:                  [][]byte{pps},
-		LengthSizeMinusOne:   3,
-	}
-
-	buf := make([]byte, recordinfo.Len())
-	recordinfo.Marshal(buf)
-
-	s.RecordInfo = recordinfo
-	s.Record = buf
-
-	var err error
-	if s.SPSInfo, err = ParseSPS(sps); err != nil {
-		return s, err
-	}
-
-	return s, nil
 }
 
 // AVCDecoderConfRecord is the avcC box payload (ISO 14496-15).

@@ -265,100 +265,6 @@ func (m *Relay) Stats() av.RelayStats {
 	}
 }
 
-func (m *Relay) readWriteLoop(ctx context.Context) {
-	fpsLimitTicker := time.NewTicker(time.Second / time.Duration(maxFps))
-	defer fpsLimitTicker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-fpsLimitTicker.C:
-			pkt, err := m.ReadPacket(ctx)
-			if err != nil {
-				m.mu.RLock()
-				cancel := m.cancel
-				m.mu.RUnlock()
-
-				if cancel != nil {
-					cancel()
-				}
-
-				return
-			}
-
-			m.packetsRead.Add(1)
-			m.bytesRead.Add(uint64(len(pkt.Data)))
-
-			if pkt.KeyFrame {
-				m.keyFrames.Add(1)
-			}
-
-			m.lastPacketAtNs.Store(time.Now().UnixNano())
-
-			if pkt.NewCodecs != nil {
-				m.mu.Lock()
-				m.headers = pkt.NewCodecs
-				m.mu.Unlock()
-			}
-
-			m.mu.RLock()
-
-			active := make([]*Consumer, 0, len(m.consumers))
-			for _, c := range m.consumers {
-				if c.LastError() != nil {
-					continue
-				}
-
-				if c.Inactive() {
-					continue
-				}
-
-				active = append(active, c)
-			}
-
-			m.mu.RUnlock()
-			// Delivery policy:
-			//   1 consumer  → blocking write (WritePacket).
-			//     Back-pressure propagates up to ReadPacket, so no packets are
-			//     dropped as long as the single consumer can keep up.
-			//   2+ consumers → leaky write (WritePacketLeaky).
-			//     A slow or stalled consumer does not block the others; it simply
-			//     misses frames that do not fit in its queue.
-			if len(active) == 1 {
-				for _, c := range active {
-					_ = c.WritePacket(ctx, pkt)
-				}
-
-				continue
-			}
-
-			for _, c := range active {
-				if err := c.WritePacketLeaky(ctx, pkt); errors.Is(err, ErrDroppingPacket) {
-					m.droppedPackets.Add(1)
-				}
-			}
-		}
-	}
-}
-
-func (m *Relay) setLastCodecError(err error) {
-	if err == nil {
-		return
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.headersErr = err
-	select {
-	case <-m.headersAvailable:
-		// already closed
-	default:
-		close(m.headersAvailable)
-	}
-}
-
 func (m *Relay) LastError() error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -472,4 +378,98 @@ func (m *Relay) Resume(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (m *Relay) readWriteLoop(ctx context.Context) {
+	fpsLimitTicker := time.NewTicker(time.Second / time.Duration(maxFps))
+	defer fpsLimitTicker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-fpsLimitTicker.C:
+			pkt, err := m.ReadPacket(ctx)
+			if err != nil {
+				m.mu.RLock()
+				cancel := m.cancel
+				m.mu.RUnlock()
+
+				if cancel != nil {
+					cancel()
+				}
+
+				return
+			}
+
+			m.packetsRead.Add(1)
+			m.bytesRead.Add(uint64(len(pkt.Data)))
+
+			if pkt.KeyFrame {
+				m.keyFrames.Add(1)
+			}
+
+			m.lastPacketAtNs.Store(time.Now().UnixNano())
+
+			if pkt.NewCodecs != nil {
+				m.mu.Lock()
+				m.headers = pkt.NewCodecs
+				m.mu.Unlock()
+			}
+
+			m.mu.RLock()
+
+			active := make([]*Consumer, 0, len(m.consumers))
+			for _, c := range m.consumers {
+				if c.LastError() != nil {
+					continue
+				}
+
+				if c.Inactive() {
+					continue
+				}
+
+				active = append(active, c)
+			}
+
+			m.mu.RUnlock()
+			// Delivery policy:
+			//   1 consumer  → blocking write (WritePacket).
+			//     Back-pressure propagates up to ReadPacket, so no packets are
+			//     dropped as long as the single consumer can keep up.
+			//   2+ consumers → leaky write (WritePacketLeaky).
+			//     A slow or stalled consumer does not block the others; it simply
+			//     misses frames that do not fit in its queue.
+			if len(active) == 1 {
+				for _, c := range active {
+					_ = c.WritePacket(ctx, pkt)
+				}
+
+				continue
+			}
+
+			for _, c := range active {
+				if err := c.WritePacketLeaky(ctx, pkt); errors.Is(err, ErrDroppingPacket) {
+					m.droppedPackets.Add(1)
+				}
+			}
+		}
+	}
+}
+
+func (m *Relay) setLastCodecError(err error) {
+	if err == nil {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.headersErr = err
+	select {
+	case <-m.headersAvailable:
+		// already closed
+	default:
+		close(m.headersAvailable)
+	}
 }

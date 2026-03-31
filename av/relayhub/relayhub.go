@@ -149,22 +149,6 @@ func (m *RelayHub) Consume(
 	}
 }
 
-func (m *RelayHub) removeConsumer(
-	ctx context.Context,
-	sourceID string,
-	consumerID string,
-) error {
-	m.mu.RLock()
-	p, ok := m.relays[sourceID]
-	m.mu.RUnlock()
-
-	if !ok {
-		return fmt.Errorf("%s: %w", sourceID, ErrRelayNotFound)
-	}
-
-	return p.RemoveConsumer(ctx, consumerID)
-}
-
 // GetActiveRelayCount implements av.RelayHub.
 func (m *RelayHub) GetActiveRelayCount(_ context.Context) int {
 	m.mu.RLock()
@@ -323,4 +307,20 @@ func (m *RelayHub) Stop() error {
 	}
 
 	return m.WaitStop()
+}
+
+func (m *RelayHub) removeConsumer(
+	ctx context.Context,
+	sourceID string,
+	consumerID string,
+) error {
+	m.mu.RLock()
+	p, ok := m.relays[sourceID]
+	m.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("%s: %w", sourceID, ErrRelayNotFound)
+	}
+
+	return p.RemoveConsumer(ctx, consumerID)
 }
