@@ -1,0 +1,131 @@
+package av
+
+import "time"
+
+// CodecType represents Video/Audio codec type. can be H264/AAC/SPEEX/...
+type CodecType uint32
+
+const (
+	codecTypeAudioBit  = 0x1
+	codecTypeOtherBits = 1
+	avCodecTypeMagic   = 233333
+)
+
+// MakeVideoCodecType makes a new video codec type.
+func MakeVideoCodecType(base uint32) CodecType {
+	c := CodecType(base) << codecTypeOtherBits
+
+	return c
+}
+
+// MakeAudioCodecType makes a new audio codec type.
+func MakeAudioCodecType(base uint32) CodecType {
+	c := CodecType(base)<<codecTypeOtherBits | CodecType(codecTypeAudioBit)
+
+	return c
+}
+
+var (
+	UNKNOWN    = MakeVideoCodecType(avCodecTypeMagic + 0)
+	H264       = MakeVideoCodecType(avCodecTypeMagic + 1) // payloadType: 96
+	H265       = MakeVideoCodecType(avCodecTypeMagic + 2)
+	JPEG       = MakeVideoCodecType(avCodecTypeMagic + 3) // payloadType: 26
+	VP8        = MakeVideoCodecType(avCodecTypeMagic + 4)
+	VP9        = MakeVideoCodecType(avCodecTypeMagic + 5)
+	AV1        = MakeVideoCodecType(avCodecTypeMagic + 6)
+	MJPEG      = MakeVideoCodecType(avCodecTypeMagic + 7)
+	AAC        = MakeAudioCodecType(avCodecTypeMagic + 1) // MPEG4-GENERIC
+	PCM_MULAW  = MakeAudioCodecType(avCodecTypeMagic + 2) // payloadType: 0
+	PCM_ALAW   = MakeAudioCodecType(avCodecTypeMagic + 3) // payloadType: 8
+	SPEEX      = MakeAudioCodecType(avCodecTypeMagic + 4) // L16 Linear PCM (big endian)
+	NELLYMOSER = MakeAudioCodecType(avCodecTypeMagic + 5)
+	PCM        = MakeAudioCodecType(avCodecTypeMagic + 6)
+	OPUS       = MakeAudioCodecType(avCodecTypeMagic + 7)  // payloadType: 111
+	MP3        = MakeAudioCodecType(avCodecTypeMagic + 8)  // MPA payload: 14, aka MPEG-1 Layer III
+	PCML       = MakeAudioCodecType(avCodecTypeMagic + 9)  // Linear PCM (little endian)
+	ELD        = MakeAudioCodecType(avCodecTypeMagic + 10) // AAC-ELD
+	FLAC       = MakeAudioCodecType(avCodecTypeMagic + 11)
+)
+
+func (s CodecType) String() string {
+	switch s {
+	case H264:
+		return "H264"
+	case H265:
+		return "H265"
+	case JPEG:
+		return "JPEG"
+	case VP8:
+		return "VP8"
+	case VP9:
+		return "VP9"
+	case AV1:
+		return "AV1"
+	case AAC:
+		return "AAC"
+	case PCM_MULAW:
+		return "PCM_MULAW"
+	case PCM_ALAW:
+		return "PCM_ALAW"
+	case SPEEX:
+		return "SPEEX"
+	case NELLYMOSER:
+		return "NELLYMOSER"
+	case PCM:
+		return "PCM"
+	case OPUS:
+		return "OPUS"
+	case MP3:
+		return "MPA"
+	case PCML:
+		return "PCML"
+	case ELD:
+		return "AAC_ELD"
+	case FLAC:
+		return "FLAC"
+	}
+
+	return ""
+}
+
+func (s CodecType) IsAudio() bool {
+	return s&codecTypeAudioBit != 0
+}
+
+func (s CodecType) IsVideo() bool {
+	return s&codecTypeAudioBit == 0
+}
+
+// Stream pairs a stream index with its codec configuration.
+// Idx matches Packet.Idx; it is the authoritative identifier and must not be inferred
+// from the slice position, as stream indices may be non-contiguous (e.g. MPEG-TS PIDs).
+type Stream struct {
+	Idx   uint16 // stream index; matches Packet.Idx
+	Codec CodecData
+}
+
+// CodecData is some important bytes for initialising audio/video decoder,
+// can be converted to VideoCodecData or AudioCodecData using:
+//
+//	codecdata.(AudioCodecData) or codecdata.(VideoCodecData)
+//
+// for H264, CodecData is AVCDecoderConfigure bytes, includes SPS/PPS.
+// for H265, CodecData is AVCDecoderConfigure bytes, includes VPS/SPS/PPS.
+type CodecData interface {
+	Type() CodecType // Video/Audio codec type
+}
+
+type VideoCodecData interface {
+	CodecData
+	Width() int        // Video width
+	Height() int       // Video height
+	TimeScale() uint32 // clock frequency for timestamp conversion (e.g. 90000 for RTP and fMP4/CMAF)
+}
+
+type AudioCodecData interface {
+	CodecData
+	SampleFormat() SampleFormat                       // audio sample format
+	SampleRate() int                                  // audio sample rate
+	ChannelLayout() ChannelLayout                     // audio channel layout
+	PacketDuration(pkt []byte) (time.Duration, error) // get audio compressed packet duration
+}

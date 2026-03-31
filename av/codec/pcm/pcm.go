@@ -1,0 +1,292 @@
+package pcm
+
+import (
+	"math"
+	"time"
+
+	"github.com/vtpl1/vrtc-sdk/av"
+)
+
+func ceil(x float32) int {
+	d, fract := math.Modf(float64(x))
+	if fract == 0.0 {
+		return int(d)
+	}
+
+	return int(d) + 1
+}
+
+func Downsample(k float32) func([]int16) []int16 {
+	var sampleN, sampleSum float32
+
+	return func(src []int16) (dst []int16) { //nolint:nonamedreturns
+		var i int
+
+		dst = make([]int16, ceil((float32(len(src))+sampleN)/k))
+		for _, sample := range src {
+			sampleSum += float32(sample)
+
+			sampleN++
+			if sampleN >= k {
+				dst[i] = int16(sampleSum / k)
+				i++
+
+				sampleSum = 0
+				sampleN -= k
+			}
+		}
+
+		return dst
+	}
+}
+
+func Upsample(k float32) func([]int16) []int16 {
+	var sampleN float32
+
+	return func(src []int16) (dst []int16) { //nolint:nonamedreturns
+		var i int
+
+		dst = make([]int16, ceil(k*float32(len(src))))
+		for _, sample := range src {
+			sampleN += k
+			for sampleN > 0 {
+				dst[i] = sample
+				i++
+
+				sampleN--
+			}
+		}
+
+		return dst
+	}
+}
+
+func FlipEndian(src []byte) (dst []byte) { //nolint:nonamedreturns
+	var i, j int
+
+	n := len(src)
+
+	dst = make([]byte, n)
+	for i < n {
+		x := src[i]
+		i++
+		dst[j] = src[i]
+		j++
+		i++
+		dst[j] = x
+		j++
+	}
+
+	return dst
+}
+
+func Transcode(dst, src av.AudioCodecData) func([]byte) []byte {
+	var (
+		reader  func([]byte) []int16
+		writer  func([]int16) []byte
+		filters []func([]int16) []int16
+	)
+
+	switch src.Type() {
+	case av.PCML:
+		reader = func(src []byte) (dst []int16) { //nolint:nonamedreturns
+			var i, j int
+
+			n := len(src)
+
+			dst = make([]int16, n/2)
+			for i < n {
+				lo := src[i]
+				i++
+				hi := src[i]
+				i++
+				dst[j] = int16(hi)<<8 | int16(lo)
+				j++
+			}
+
+			return dst
+		}
+	case av.PCM:
+		reader = func(src []byte) (dst []int16) { //nolint:nonamedreturns
+			var i, j int
+
+			n := len(src)
+
+			dst = make([]int16, n/2)
+			for i < n {
+				hi := src[i]
+				i++
+				lo := src[i]
+				i++
+				dst[j] = int16(hi)<<8 | int16(lo)
+				j++
+			}
+
+			return dst
+		}
+	case av.PCM_MULAW:
+		reader = func(src []byte) (dst []int16) { //nolint:nonamedreturns
+			var i int
+
+			dst = make([]int16, len(src))
+			for _, sample := range src {
+				dst[i] = PCMUtoPCM(sample)
+				i++
+			}
+
+			return dst
+		}
+	case av.PCM_ALAW:
+		reader = func(src []byte) (dst []int16) { //nolint:nonamedreturns
+			var i int
+
+			dst = make([]int16, len(src))
+			for _, sample := range src {
+				dst[i] = PCMAtoPCM(sample)
+				i++
+			}
+
+			return dst
+		}
+	}
+
+	if src.ChannelLayout().Count() > 1 {
+		filters = append(filters, Downsample(float32(src.ChannelLayout().Count())))
+	}
+
+	if src.SampleRate() > dst.SampleRate() {
+		filters = append(filters, Downsample(float32(src.SampleRate())/float32(dst.SampleRate())))
+	} else if src.SampleRate() < dst.SampleRate() {
+		filters = append(filters, Upsample(float32(dst.SampleRate())/float32(src.SampleRate())))
+	}
+
+	if dst.ChannelLayout().Count() > 1 {
+		filters = append(filters, Upsample(float32(dst.ChannelLayout().Count())))
+	}
+
+	switch dst.Type() {
+	case av.PCML:
+		writer = func(src []int16) (dst []byte) { //nolint:nonamedreturns
+			var i int
+
+			dst = make([]byte, len(src)*2)
+			for _, sample := range src {
+				dst[i] = byte(sample)
+				i++
+				dst[i] = byte(sample >> 8)
+				i++
+			}
+
+			return dst
+		}
+	case av.PCM:
+		writer = func(src []int16) (dst []byte) { //nolint:nonamedreturns
+			var i int
+
+			dst = make([]byte, len(src)*2)
+			for _, sample := range src {
+				dst[i] = byte(sample >> 8)
+				i++
+				dst[i] = byte(sample)
+				i++
+			}
+
+			return dst
+		}
+	case av.PCM_MULAW:
+		writer = func(src []int16) (dst []byte) { //nolint:nonamedreturns
+			var i int
+
+			dst = make([]byte, len(src))
+			for _, sample := range src {
+				dst[i] = PCMtoPCMU(sample)
+				i++
+			}
+
+			return dst
+		}
+	case av.PCM_ALAW:
+		writer = func(src []int16) (dst []byte) { //nolint:nonamedreturns
+			var i int
+
+			dst = make([]byte, len(src))
+			for _, sample := range src {
+				dst[i] = PCMtoPCMA(sample)
+				i++
+			}
+
+			return dst
+		}
+	}
+
+	return func(b []byte) []byte {
+		samples := reader(b)
+		for _, filter := range filters {
+			samples = filter(samples)
+		}
+
+		return writer(samples)
+	}
+}
+
+// func ConsumerCodecs() []*core.Codec {
+// 	return []*core.Codec{
+// 		{Name: core.CodecPCML},
+// 		{Name: core.CodecPCM},
+// 		{Name: core.CodecPCMA},
+// 		{Name: core.CodecPCMU},
+// 	}
+// }
+
+// func ProducerCodecs() []*core.Codec {
+// 	return []*core.Codec{
+// 		{Name: core.CodecPCML, ClockRate: 16000},
+// 		{Name: core.CodecPCM, ClockRate: 16000},
+// 		{Name: core.CodecPCML, ClockRate: 8000},
+// 		{Name: core.CodecPCM, ClockRate: 8000},
+// 		{Name: core.CodecPCMA, ClockRate: 8000},
+// 		{Name: core.CodecPCMU, ClockRate: 8000},
+// 		{Name: core.CodecPCML, ClockRate: 22050}, // wyoming-snd-external
+// 	}
+// }
+
+type PCMCodecData struct {
+	Typ        av.CodecType
+	SmplFormat av.SampleFormat
+	SmplRate   int
+	ChLayout   av.ChannelLayout
+}
+
+// ChannelLayout implements av.AudioCodecData.
+func (m PCMCodecData) ChannelLayout() av.ChannelLayout {
+	return m.ChLayout
+}
+
+// PacketDuration implements av.AudioCodecData.
+func (m PCMCodecData) PacketDuration(pkt []byte) (time.Duration, error) {
+	return time.Duration(len(pkt)) * time.Second / time.Duration(m.SampleRate()), nil
+}
+
+// SampleFormat implements av.AudioCodecData.
+func (m PCMCodecData) SampleFormat() av.SampleFormat {
+	return m.SmplFormat
+}
+
+// SampleRate implements av.AudioCodecData.
+func (m PCMCodecData) SampleRate() int {
+	return m.SmplRate
+}
+
+// Type implements av.AudioCodecData.
+func (m PCMCodecData) Type() av.CodecType {
+	return m.Typ
+}
+
+func NewPCMCodecData() av.AudioCodecData {
+	return PCMCodecData{
+		Typ:        av.PCM,
+		SmplFormat: av.S16,
+		SmplRate:   8000,
+		ChLayout:   av.ChMono,
+	}
+}
