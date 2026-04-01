@@ -3,7 +3,7 @@
 A Go library for building audio/video pipelines. It provides the core data model, codec utilities, container formats, and a fan-out relay hub used by the `vrtc` edge and recording services.
 
 **Module:** `github.com/vtpl1/vrtc-sdk`  
-**Version:** v0.2.0
+**Version:** v0.3.0
 **Go version:** 1.26+
 
 ---
@@ -25,6 +25,7 @@ A Go library for building audio/video pipelines. It provides the core data model
 | `av/format/fmp4` | Fragmented MP4 (ISO 14496-12) muxer and demuxer |
 | `av/format/mp4` | Standard MP4 muxer and demuxer |
 | `av/format/grpc` | gRPC transport: PushStream (client→server) and PullStream (server→client) with pause/seek |
+| `av/format/rtsp` | RTSP demuxer with RTP/H.264 packet reassembly |
 | `av/format/llhls` | Low-Latency HLS (CMAF) muxer with built-in HTTP handler |
 | `av/format/mse` | fMP4-over-WebSocket muxer for browser Media Source Extensions |
 | `lifecycle` | `StartStopper` / `Stopper` interfaces and signal helpers |
