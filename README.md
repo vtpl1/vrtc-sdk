@@ -3,7 +3,7 @@
 A Go library for building audio/video pipelines. It provides the core data model, codec utilities, container formats, and a fan-out relay hub used by the `vrtc` edge and recording services.
 
 **Module:** `github.com/vtpl1/vrtc-sdk`  
-**Version:** v0.3.0
+**Version:** v0.4.0
 **Go version:** 1.26+
 
 ---
