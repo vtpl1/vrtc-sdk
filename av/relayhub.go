@@ -7,6 +7,15 @@ import (
 	"github.com/vtpl1/vrtc-sdk/lifecycle"
 )
 
+// StreamInfo describes a single audio or video stream within a relay.
+type StreamInfo struct {
+	Idx        uint16    `json:"idx"`
+	CodecType  CodecType `json:"codecType"`
+	Width      int       `json:"width,omitempty"`
+	Height     int       `json:"height,omitempty"`
+	SampleRate int       `json:"sampleRate,omitempty"`
+}
+
 // RelayStats is a point-in-time snapshot of a single relay's metrics.
 type RelayStats struct {
 	ID             string    `json:"id"`
@@ -18,6 +27,11 @@ type RelayStats struct {
 	StartedAt      time.Time `json:"startedAt"`
 	LastPacketAt   time.Time `json:"lastPacketAt"`
 	LastError      string    `json:"lastError,omitempty"`
+
+	// Stream metadata from the relay's current codec headers.
+	Streams    []StreamInfo `json:"streams,omitempty"`
+	ActualFPS  float64      `json:"actualFps"`
+	BitrateBps float64      `json:"bitrateBps"`
 }
 
 // ConsumeOptions configures a consumer attachment to a relay.

@@ -239,6 +239,7 @@ func (m *Relay) Stats() av.RelayStats {
 	consumerCount := len(m.consumers)
 	lastErr := m.headersErr
 	startedAt := m.startedAt
+	headers := m.headers
 	m.mu.RUnlock()
 
 	errStr := ""
@@ -247,21 +248,52 @@ func (m *Relay) Stats() av.RelayStats {
 	}
 
 	var lastPacketAt time.Time
-
 	if ns := m.lastPacketAtNs.Load(); ns > 0 {
 		lastPacketAt = time.Unix(0, ns)
+	}
+
+	// Build per-stream info from codec headers.
+	var streams []av.StreamInfo
+	for _, s := range headers {
+		si := av.StreamInfo{
+			Idx:       s.Idx,
+			CodecType: s.Codec.Type(),
+		}
+		if vcd, ok := s.Codec.(av.VideoCodecData); ok {
+			si.Width = vcd.Width()
+			si.Height = vcd.Height()
+		}
+		if acd, ok := s.Codec.(av.AudioCodecData); ok {
+			si.SampleRate = acd.SampleRate()
+		}
+		streams = append(streams, si)
+	}
+
+	// Compute average FPS and bitrate from counters.
+	packetsRead := m.packetsRead.Load()
+	bytesRead := m.bytesRead.Load()
+	var actualFPS, bitrateBps float64
+	if !startedAt.IsZero() {
+		elapsed := time.Since(startedAt).Seconds()
+		if elapsed > 0 {
+			actualFPS = float64(packetsRead) / elapsed
+			bitrateBps = float64(bytesRead) * 8 / elapsed
+		}
 	}
 
 	return av.RelayStats{
 		ID:             m.id,
 		ConsumerCount:  consumerCount,
-		PacketsRead:    m.packetsRead.Load(),
-		BytesRead:      m.bytesRead.Load(),
+		PacketsRead:    packetsRead,
+		BytesRead:      bytesRead,
 		KeyFrames:      m.keyFrames.Load(),
 		DroppedPackets: m.droppedPackets.Load(),
 		StartedAt:      startedAt,
 		LastPacketAt:   lastPacketAt,
 		LastError:      errStr,
+		Streams:        streams,
+		ActualFPS:      actualFPS,
+		BitrateBps:     bitrateBps,
 	}
 }
 
