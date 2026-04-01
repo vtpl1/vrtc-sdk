@@ -42,6 +42,35 @@ type Relay struct {
 	startedAt      time.Time    // set once in Start; zero until Start is called
 }
 
+func mergeStreamHeaders(current, changed []av.Stream) []av.Stream {
+	if len(changed) == 0 {
+		return append([]av.Stream(nil), current...)
+	}
+
+	if len(current) == 0 {
+		return append([]av.Stream(nil), changed...)
+	}
+
+	merged := append([]av.Stream(nil), current...)
+	indexByID := make(map[uint16]int, len(merged))
+	for i, s := range merged {
+		indexByID[s.Idx] = i
+	}
+
+	for _, s := range changed {
+		if idx, ok := indexByID[s.Idx]; ok {
+			merged[idx] = s
+
+			continue
+		}
+
+		indexByID[s.Idx] = len(merged)
+		merged = append(merged, s)
+	}
+
+	return merged
+}
+
 // NewRelay creates a Relay for the given sourceID. Start must be called to
 // begin reading packets from the demuxer.
 func NewRelay(
@@ -445,7 +474,7 @@ func (m *Relay) readWriteLoop(ctx context.Context) {
 
 			if pkt.NewCodecs != nil {
 				m.mu.Lock()
-				m.headers = pkt.NewCodecs
+				m.headers = mergeStreamHeaders(m.headers, pkt.NewCodecs)
 				m.mu.Unlock()
 			}
 

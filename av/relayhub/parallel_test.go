@@ -159,6 +159,28 @@ func (m *failingMuxer) WritePacket(_ context.Context, _ av.Packet) error {
 func (m *failingMuxer) WriteTrailer(_ context.Context, _ error) error { return nil }
 func (m *failingMuxer) Close() error                                  { return nil }
 
+type fakeVideoCodec struct {
+	typ           av.CodecType
+	width, height int
+	timeScale     uint32
+}
+
+func (c fakeVideoCodec) Type() av.CodecType { return c.typ }
+func (c fakeVideoCodec) Width() int         { return c.width }
+func (c fakeVideoCodec) Height() int        { return c.height }
+func (c fakeVideoCodec) TimeScale() uint32  { return c.timeScale }
+
+type fakeAudioCodec struct {
+	typ        av.CodecType
+	sampleRate int
+}
+
+func (c fakeAudioCodec) Type() av.CodecType                           { return c.typ }
+func (c fakeAudioCodec) SampleFormat() av.SampleFormat                { return av.S16 }
+func (c fakeAudioCodec) SampleRate() int                              { return c.sampleRate }
+func (c fakeAudioCodec) ChannelLayout() av.ChannelLayout              { return av.ChMono }
+func (c fakeAudioCodec) PacketDuration([]byte) (time.Duration, error) { return 0, nil }
+
 // =============================================================================
 // Test helpers
 // =============================================================================
@@ -1295,6 +1317,111 @@ func TestCodecChangeForwardedToCodecChanger(t *testing.T) {
 	}
 
 	t.Errorf("WriteCodecChange was not called on the CodecChanger muxer within 3 s (changeAfter=%d)", changeAfter)
+}
+
+func TestRelayStatsPreserveFullStreamSetAfterPartialCodecChange(t *testing.T) {
+	t.Parallel()
+
+	const (
+		changeAfter   = int64(5)
+		initialWidth  = 1920
+		initialHeight = 1080
+		initialAudio  = 8000
+		changedAudio  = 16000
+	)
+
+	initialStreams := []av.Stream{
+		{
+			Idx: 0,
+			Codec: fakeVideoCodec{
+				typ:       av.H264,
+				width:     initialWidth,
+				height:    initialHeight,
+				timeScale: 90000,
+			},
+		},
+		{
+			Idx: 1,
+			Codec: fakeAudioCodec{
+				typ:        av.OPUS,
+				sampleRate: initialAudio,
+			},
+		},
+	}
+
+	demuxFactory := func(_ context.Context, _ string) (av.DemuxCloser, error) {
+		return &codecChangingDemuxer{
+			streams: initialStreams,
+			newStreams: []av.Stream{{
+				Idx: 1,
+				Codec: fakeAudioCodec{
+					typ:        av.OPUS,
+					sampleRate: changedAudio,
+				},
+			}},
+			changeAfter: changeAfter,
+		}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	sm := relayhub.New(demuxFactory, nil)
+	if err := sm.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = sm.Stop() })
+
+	muxFactory := func(_ context.Context, _ string) (av.MuxCloser, error) {
+		return &mockMuxer{}, nil
+	}
+
+	handle, err := sm.Consume(ctx, "producer-1", av.ConsumeOptions{
+		ConsumerID:   "consumer-1",
+		MuxerFactory: muxFactory,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = handle.Close(ctx) })
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		stats := sm.GetRelayStats(ctx)
+		if len(stats) != 1 {
+			time.Sleep(10 * time.Millisecond)
+
+			continue
+		}
+
+		streams := stats[0].Streams
+		if len(streams) != 2 {
+			time.Sleep(10 * time.Millisecond)
+
+			continue
+		}
+
+		if streams[0].Idx != 0 || streams[0].CodecType != av.H264 ||
+			streams[0].Width != initialWidth || streams[0].Height != initialHeight {
+			t.Fatalf("video stream metadata lost after partial codec change: %+v", streams[0])
+		}
+
+		if streams[1].Idx != 1 || streams[1].CodecType != av.OPUS {
+			t.Fatalf("audio stream metadata changed unexpectedly after partial codec change: %+v", streams[1])
+		}
+
+		if streams[1].SampleRate != changedAudio {
+			time.Sleep(10 * time.Millisecond)
+
+			continue
+		}
+
+		return
+	}
+
+	t.Fatalf("GetRelayStats did not retain the full stream set after partial codec change")
 }
 
 // =============================================================================
