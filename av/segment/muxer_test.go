@@ -161,6 +161,79 @@ func TestSegmentMuxer_FullLifecycle(t *testing.T) {
 	}
 }
 
+func TestSegmentMuxer_CloseAfterWriteTrailerFinalizes(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "trailer-first.mp4")
+	startTime := time.Now().UTC()
+
+	var mu sync.Mutex
+	closeCalls := 0
+	var gotInfo segment.SegmentCloseInfo
+
+	onClose := func(info segment.SegmentCloseInfo) {
+		mu.Lock()
+		closeCalls++
+		gotInfo = info
+		mu.Unlock()
+	}
+
+	mux, err := segment.NewSegmentMuxer(path, startTime, segment.ProfileSSD, 0, 0, nil, onClose)
+	if err != nil {
+		t.Fatalf("NewSegmentMuxer: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := mux.WriteHeader(ctx, makeStreams(t)); err != nil {
+		t.Fatalf("WriteHeader: %v", err)
+	}
+
+	if err := mux.WritePacket(ctx, makeKeyframe(0)); err != nil {
+		t.Fatalf("WritePacket(kf0): %v", err)
+	}
+
+	if err := mux.WritePacket(ctx, makeKeyframe(33*time.Millisecond)); err != nil {
+		t.Fatalf("WritePacket(kf1): %v", err)
+	}
+
+	if err := mux.WriteTrailer(ctx, nil); err != nil {
+		t.Fatalf("WriteTrailer: %v", err)
+	}
+
+	if err := mux.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	mu.Lock()
+	info := gotInfo
+	gotCalls := closeCalls
+	mu.Unlock()
+
+	if gotCalls != 1 {
+		t.Fatalf("onClose calls = %d, want 1", gotCalls)
+	}
+
+	if info.Path != path {
+		t.Errorf("CloseInfo.Path = %q, want %q", info.Path, path)
+	}
+
+	if info.Start != startTime {
+		t.Errorf("CloseInfo.Start = %v, want %v", info.Start, startTime)
+	}
+
+	if info.End.Before(startTime) {
+		t.Error("CloseInfo.End should be after Start")
+	}
+
+	if info.SizeBytes <= 0 {
+		t.Errorf("CloseInfo.SizeBytes = %d, want > 0", info.SizeBytes)
+	}
+
+	if info.ValidationError != nil {
+		t.Errorf("CloseInfo.ValidationError = %v, want nil", info.ValidationError)
+	}
+}
+
 func TestSegmentMuxer_AnalyticsFlags_NoAnalytics(t *testing.T) {
 	t.Parallel()
 

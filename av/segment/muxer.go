@@ -3,6 +3,7 @@ package segment
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"time"
 
@@ -199,7 +200,7 @@ func (m *SegmentMuxer) Close() error {
 	m.closed = true
 	endTime := time.Now().UTC()
 
-	if err := m.WriteTrailer(context.Background(), nil); err != nil {
+	if err := m.WriteTrailer(context.Background(), nil); err != nil && !errors.Is(err, fmp4.ErrTrailerAlreadyWritten) {
 		return err
 	}
 
