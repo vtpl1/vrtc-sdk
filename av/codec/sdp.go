@@ -19,7 +19,7 @@ import (
 // SdpToCodecs parses an SDP session description and returns CodecData for each
 // supported RTSP media track. Unsupported tracks are silently skipped.
 //
-//nolint:gocognit,funlen, gocyclo, cyclop
+//nolint:funlen
 func SdpToCodecs(s string) ([]av.CodecData, error) {
 	sd := sdp.SessionDescription{}
 	err := sd.UnmarshalString(s)
@@ -50,7 +50,7 @@ func SdpToCodecs(s string) ([]av.CodecData, error) {
 			controlURL = field
 		}
 
-		field, ok = media.Attribute("fmtp")
+		field, _ = media.Attribute("fmtp")
 		fmtp := parseFMTP(field)
 
 		switch mediaStr {
@@ -60,7 +60,14 @@ func SdpToCodecs(s string) ([]av.CodecData, error) {
 				ret = append(ret, codecData)
 			}
 		case "audio":
-			codecData, ok := parseAudioCodec(mediaTypeStr, controlURL, payloadType, clockRate, channels, fmtp)
+			codecData, ok := parseAudioCodec(
+				mediaTypeStr,
+				controlURL,
+				payloadType,
+				clockRate,
+				channels,
+				fmtp,
+			)
 			if ok {
 				ret = append(ret, codecData)
 			}
@@ -118,6 +125,7 @@ func parseFMTP(field string) map[string]string {
 		}
 
 		key := strings.TrimSpace(parts[0])
+
 		val := strings.TrimSpace(parts[1])
 		if key == "" || val == "" {
 			continue
@@ -129,7 +137,11 @@ func parseFMTP(field string) map[string]string {
 	return out
 }
 
-func parseVideoCodec(mediaTypeStr string, controlURL string, fmtp map[string]string) (av.CodecData, bool) {
+func parseVideoCodec(
+	mediaTypeStr string,
+	controlURL string,
+	fmtp map[string]string,
+) (av.CodecData, bool) {
 	var spropVPS, spropSPS, spropPPS []byte
 
 	for key, val := range fmtp {

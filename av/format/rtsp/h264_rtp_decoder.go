@@ -29,121 +29,6 @@ type h264RTPDecoder struct {
 	frameBufferTimestamp uint32
 }
 
-func (d *h264RTPDecoder) resetFragments() {
-	d.fragments = d.fragments[:0]
-	d.fragmentsSize = 0
-}
-
-func (d *h264RTPDecoder) decodeNALUs(pkt *rtp.Packet) ([][]byte, error) {
-	if len(pkt.Payload) < 1 {
-		d.resetFragments()
-
-		return nil, fmt.Errorf("h264: payload is too short")
-	}
-
-	typ := pkt.Payload[0] & 0x1f
-
-	var nalus [][]byte
-
-	switch typ {
-	case h264TypeFUA:
-		if len(pkt.Payload) < 2 {
-			d.resetFragments()
-
-			return nil, fmt.Errorf("h264: invalid FU-A packet")
-		}
-
-		start := pkt.Payload[1] >> 7
-		end := (pkt.Payload[1] >> 6) & 0x01
-
-		if start == 1 {
-			d.resetFragments()
-
-			nri := (pkt.Payload[0] >> 5) & 0x03
-			naluType := pkt.Payload[1] & 0x1f
-			d.fragmentsSize = len(pkt.Payload[1:])
-			d.fragments = append(d.fragments, []byte{(nri << 5) | naluType}, pkt.Payload[2:])
-			d.fragmentNextSeqNum = pkt.SequenceNumber + 1
-			d.firstPacketReceived = true
-
-			if end == 1 {
-				nalus = splitNALUsAnnexB(joinFragments(d.fragments, d.fragmentsSize))
-				d.resetFragments()
-
-				break
-			}
-
-			return nil, errNeedMorePackets
-		}
-
-		if d.fragmentsSize == 0 {
-			if !d.firstPacketReceived {
-				return nil, errNeedMorePackets
-			}
-
-			return nil, fmt.Errorf("h264: non-starting FU-A packet")
-		}
-
-		if pkt.SequenceNumber != d.fragmentNextSeqNum {
-			d.resetFragments()
-
-			return nil, fmt.Errorf("h264: packet loss while decoding FU-A")
-		}
-
-		d.fragmentsSize += len(pkt.Payload[2:])
-		if d.fragmentsSize > maxH264AccessUnitSize {
-			errSize := d.fragmentsSize
-			d.resetFragments()
-
-			return nil, fmt.Errorf("h264: access unit too big: %d", errSize)
-		}
-
-		d.fragments = append(d.fragments, pkt.Payload[2:])
-		d.fragmentNextSeqNum++
-
-		if end != 1 {
-			return nil, errNeedMorePackets
-		}
-
-		nalus = splitNALUsAnnexB(joinFragments(d.fragments, d.fragmentsSize))
-		d.resetFragments()
-
-	case h264TypeSTAPA:
-		d.resetFragments()
-
-		payload := pkt.Payload[1:]
-
-		for {
-			if len(payload) < 2 {
-				return nil, fmt.Errorf("h264: invalid STAP-A packet")
-			}
-
-			size := int(uint16(payload[0])<<8 | uint16(payload[1]))
-			payload = payload[2:]
-
-			if size == 0 || size > len(payload) {
-				return nil, fmt.Errorf("h264: invalid STAP-A payload size")
-			}
-
-			nalus = append(nalus, payload[:size])
-			payload = payload[size:]
-
-			if len(payload) == 0 {
-				break
-			}
-		}
-
-		d.firstPacketReceived = true
-
-	default:
-		d.resetFragments()
-		d.firstPacketReceived = true
-		nalus = [][]byte{pkt.Payload}
-	}
-
-	return nalus, nil
-}
-
 // Decode returns a complete access unit (NALU list) when available.
 func (d *h264RTPDecoder) Decode(pkt *rtp.Packet) ([][]byte, error) {
 	nalus, err := d.decodeNALUs(pkt)
@@ -178,18 +63,133 @@ func (d *h264RTPDecoder) Decode(pkt *rtp.Packet) ([][]byte, error) {
 	return ret, nil
 }
 
+func (d *h264RTPDecoder) resetFragments() {
+	d.fragments = d.fragments[:0]
+	d.fragmentsSize = 0
+}
+
+func (d *h264RTPDecoder) decodeNALUs(pkt *rtp.Packet) ([][]byte, error) {
+	if len(pkt.Payload) < 1 {
+		d.resetFragments()
+
+		return nil, errH264PayloadTooShort
+	}
+
+	typ := pkt.Payload[0] & 0x1f
+
+	var nalus [][]byte
+
+	switch typ {
+	case h264TypeFUA:
+		if len(pkt.Payload) < 2 {
+			d.resetFragments()
+
+			return nil, errH264InvalidFUAPacket
+		}
+
+		start := pkt.Payload[1] >> 7
+		end := (pkt.Payload[1] >> 6) & 0x01
+
+		if start == 1 {
+			d.resetFragments()
+
+			nri := (pkt.Payload[0] >> 5) & 0x03
+			naluType := pkt.Payload[1] & 0x1f
+			d.fragmentsSize = len(pkt.Payload[1:])
+			d.fragments = append(d.fragments, []byte{(nri << 5) | naluType}, pkt.Payload[2:])
+			d.fragmentNextSeqNum = pkt.SequenceNumber + 1
+			d.firstPacketReceived = true
+
+			if end == 1 {
+				nalus = splitNALUsAnnexB(joinFragments(d.fragments, d.fragmentsSize))
+				d.resetFragments()
+
+				break
+			}
+
+			return nil, errNeedMorePackets
+		}
+
+		if d.fragmentsSize == 0 {
+			if !d.firstPacketReceived {
+				return nil, errNeedMorePackets
+			}
+
+			return nil, errH264NonStartingFUAPacket
+		}
+
+		if pkt.SequenceNumber != d.fragmentNextSeqNum {
+			d.resetFragments()
+
+			return nil, errH264PacketLossWhileDecodingFUA
+		}
+
+		d.fragmentsSize += len(pkt.Payload[2:])
+		if d.fragmentsSize > maxH264AccessUnitSize {
+			errSize := d.fragmentsSize
+			d.resetFragments()
+
+			return nil, fmt.Errorf("%w: %d", errH264AccessUnitTooBig, errSize)
+		}
+
+		d.fragments = append(d.fragments, pkt.Payload[2:])
+		d.fragmentNextSeqNum++
+
+		if end != 1 {
+			return nil, errNeedMorePackets
+		}
+
+		nalus = splitNALUsAnnexB(joinFragments(d.fragments, d.fragmentsSize))
+		d.resetFragments()
+
+	case h264TypeSTAPA:
+		d.resetFragments()
+
+		payload := pkt.Payload[1:]
+
+		for {
+			if len(payload) < 2 {
+				return nil, errH264InvalidSTAPAPacket
+			}
+
+			size := int(uint16(payload[0])<<8 | uint16(payload[1]))
+			payload = payload[2:]
+
+			if size == 0 || size > len(payload) {
+				return nil, errH264InvalidSTAPAPayloadSize
+			}
+
+			nalus = append(nalus, payload[:size])
+			payload = payload[size:]
+
+			if len(payload) == 0 {
+				break
+			}
+		}
+
+		d.firstPacketReceived = true
+
+	default:
+		d.resetFragments()
+		d.firstPacketReceived = true
+		nalus = [][]byte{pkt.Payload}
+	}
+
+	return nalus, nil
+}
+
 func (d *h264RTPDecoder) addToFrameBuffer(nalus [][]byte, l int, ts uint32) error {
 	if (d.frameBufferLen + l) > maxH264NALUsPerAU {
 		d.resetFrameBuffer()
 
-		return fmt.Errorf("h264: too many NALUs in access unit")
+		return errH264TooManyNALUsInAccessUnit
 	}
 
 	addSize := accessUnitSize(nalus)
 	if (d.frameBufferSize + addSize) > maxH264AccessUnitSize {
 		d.resetFrameBuffer()
 
-		return fmt.Errorf("h264: access unit too big")
+		return errH264AccessUnitTooBig
 	}
 
 	d.frameBuffer = append(d.frameBuffer, nalus...)
@@ -219,6 +219,7 @@ func splitNALUsAnnexB(b []byte) [][]byte {
 		}
 
 		sz := 3
+
 		if idx > 0 && b[idx-1] == 0x00 {
 			idx--
 			sz++

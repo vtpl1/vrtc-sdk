@@ -367,6 +367,76 @@ func TestSegmentMuxer_WithRingBuffer(t *testing.T) {
 	}
 }
 
+func TestSegmentMuxer_RingBufferStoresCompleteFragments(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "ring-fragments.mp4")
+	ring := segment.NewRingBuffer(10 * time.Second)
+
+	mux, err := segment.NewSegmentMuxer(path, time.Now(), segment.ProfileSSD, 0, 0, ring, nil)
+	if err != nil {
+		t.Fatalf("NewSegmentMuxer: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := mux.WriteHeader(ctx, makeStreams(t)); err != nil {
+		t.Fatalf("WriteHeader: %v", err)
+	}
+
+	t0 := time.Now().UTC()
+	pkt0 := makeKeyframe(0)
+	pkt0.WallClockTime = t0
+
+	if err := mux.WritePacket(ctx, pkt0); err != nil {
+		t.Fatalf("WritePacket(pkt0): %v", err)
+	}
+
+	pkt1 := makeKeyframe(33 * time.Millisecond)
+	pkt1.WallClockTime = t0.Add(33 * time.Millisecond)
+
+	if err := mux.WritePacket(ctx, pkt1); err != nil {
+		t.Fatalf("WritePacket(pkt1): %v", err)
+	}
+
+	frags := ring.ReadFrom(0)
+	if len(frags) != 1 {
+		t.Fatalf("expected 1 completed fragment before Close, got %d", len(frags))
+	}
+
+	if frags[0].DTS != 0 {
+		t.Fatalf("fragment DTS: got %v, want 0", frags[0].DTS)
+	}
+
+	if frags[0].Duration != 33*time.Millisecond {
+		t.Fatalf("fragment Duration: got %v, want 33ms", frags[0].Duration)
+	}
+
+	if !frags[0].KeyFrame {
+		t.Fatal("expected fragment to be marked as keyframe")
+	}
+
+	if len(frags[0].Data) == 0 {
+		t.Fatal("expected fragment bytes to be captured")
+	}
+
+	if !frags[0].Timestamp.Equal(t0) {
+		t.Fatalf("fragment Timestamp: got %v, want %v", frags[0].Timestamp, t0)
+	}
+
+	if err := mux.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	frags = ring.ReadFrom(33 * time.Millisecond)
+	if len(frags) != 1 {
+		t.Fatalf("expected trailing fragment after Close, got %d", len(frags))
+	}
+
+	if frags[0].DTS != 33*time.Millisecond {
+		t.Fatalf("trailing fragment DTS: got %v, want 33ms", frags[0].DTS)
+	}
+}
+
 func TestSegmentMuxer_ValidationError_EmptyFile(t *testing.T) {
 	t.Parallel()
 

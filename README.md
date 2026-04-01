@@ -3,7 +3,7 @@
 A Go library for building audio/video pipelines. It provides the core data model, codec utilities, container formats, and a fan-out relay hub used by the `vrtc` edge and recording services.
 
 **Module:** `github.com/vtpl1/vrtc-sdk`  
-**Version:** v0.4.0
+**Version:** v0.4.1
 **Go version:** 1.26+
 
 ---
@@ -73,7 +73,7 @@ type Packet struct {
     WallClockTime   time.Time
     Data            []byte        // AVCC for H.264/H.265; raw encoded samples for audio
     Analytics       *FrameAnalytics
-    NewCodecs       []Stream      // non-nil on mid-stream codec change
+    NewCodecs       []Stream      // non-nil on mid-stream codec change; full replacement stream list
 }
 ```
 
@@ -206,7 +206,7 @@ type StreamInfo struct {
 Notes:
 
 - `Streams` is derived from the relay's current codec headers and is refreshed on mid-stream codec changes (`pkt.NewCodecs`).
-- Today the relay replaces its stored headers with `pkt.NewCodecs` verbatim. If a demuxer emits partial codec-change updates, `Streams` may contain only the changed streams rather than the full stream set.
+- `pkt.NewCodecs` is treated as a full replacement stream list, so relays and consumers replace their stored codec headers verbatim on change.
 - `ActualFPS` is computed as `PacketsRead / elapsedSecondsSinceStart`, so for mixed audio/video relays it is an aggregate packet rate, not strictly video frame rate.
 - `BitrateBps` is computed as `(BytesRead * 8) / elapsedSecondsSinceStart`.
 - `DroppedPackets` increments only in the `2+` consumer leaky-delivery mode when a consumer queue is full.

@@ -405,9 +405,11 @@ func (s *HEVCDecoderConfigurationRecord) Marshal(b []byte, info SPSInfo) int {
 	if len(s.VPS) > 0 {
 		numArrays++
 	}
+
 	if len(s.SPS) > 0 {
 		numArrays++
 	}
+
 	if len(s.PPS) > 0 {
 		numArrays++
 	}

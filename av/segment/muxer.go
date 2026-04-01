@@ -1,6 +1,7 @@
 package segment
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"time"
@@ -40,11 +41,13 @@ type SegmentMuxer struct {
 	maxSegmentBytes int64 // 0 = no size limit
 	onClose         func(SegmentCloseInfo)
 	closed          bool
+	hasVideoTracks  bool
+	frag            pendingFragment
 
 	// analytics flags — set during WritePacket
-	hasMotion    bool
-	hasObjects   bool
-	hasKeyframe  bool // true after the first keyframe is written
+	hasMotion   bool
+	hasObjects  bool
+	hasKeyframe bool // true after the first keyframe is written
 }
 
 // NewSegmentMuxer creates the output file at path with storage-optimised
@@ -68,6 +71,7 @@ func NewSegmentMuxer(
 	onClose func(SegmentCloseInfo),
 ) (*SegmentMuxer, error) {
 	fixedSize := maxSegmentBytes > 0 && preallocBytes > 0
+
 	w, err := NewAdaptiveWriter(path, profile, preallocBytes, fixedSize)
 	if err != nil {
 		return nil, err
@@ -76,7 +80,7 @@ func NewSegmentMuxer(
 	var target io.Writer = w
 
 	if ring != nil {
-		target = &teeWriter{disk: w, ring: ring}
+		target = &teeWriter{disk: w}
 	}
 
 	return &SegmentMuxer{
@@ -92,15 +96,27 @@ func NewSegmentMuxer(
 }
 
 func (m *SegmentMuxer) WriteHeader(ctx context.Context, streams []av.Stream) error {
+	m.hasVideoTracks = false
+
+	for _, s := range streams {
+		if s.Codec.Type().IsVideo() {
+			m.hasVideoTracks = true
+
+			break
+		}
+	}
+
 	return m.inner.WriteHeader(ctx, streams)
 }
 
 func (m *SegmentMuxer) WritePacket(ctx context.Context, pkt av.Packet) error {
 	// Size-based rotation: signal at the first keyframe after threshold,
 	// but only after at least one keyframe has been written to this segment.
-	if m.maxSegmentBytes > 0 && pkt.KeyFrame && m.hasKeyframe && m.writer.BytesWritten() >= m.maxSegmentBytes {
+	if m.maxSegmentBytes > 0 && pkt.KeyFrame && m.hasKeyframe &&
+		m.writer.BytesWritten() >= m.maxSegmentBytes {
 		return relayhub.ErrMuxerRotate
 	}
+
 	if pkt.KeyFrame {
 		m.hasKeyframe = true
 	}
@@ -113,11 +129,64 @@ func (m *SegmentMuxer) WritePacket(ctx context.Context, pkt av.Packet) error {
 		}
 	}
 
-	return m.inner.WritePacket(ctx, pkt)
+	var flushed pendingFragment
+
+	flushesBeforeAppend := m.hasVideoTracks && pkt.KeyFrame && m.frag.valid
+	if flushesBeforeAppend {
+		flushed = m.frag
+	}
+
+	tw, _ := m.tee.(*teeWriter)
+	if tw != nil {
+		tw.ResetCapture()
+	}
+
+	if err := m.inner.WritePacket(ctx, pkt); err != nil {
+		return err
+	}
+
+	if !m.hasVideoTracks {
+		m.frag.observe(pkt)
+
+		if tw != nil {
+			m.pushFragment(tw.CapturedBytes(), m.frag)
+		}
+
+		m.frag = pendingFragment{}
+
+		return nil
+	}
+
+	if flushesBeforeAppend {
+		if tw != nil {
+			m.pushFragment(tw.CapturedBytes(), flushed)
+		}
+
+		m.frag = pendingFragment{}
+	}
+
+	m.frag.observe(pkt)
+
+	return nil
 }
 
 func (m *SegmentMuxer) WriteTrailer(ctx context.Context, upstreamErr error) error {
-	return m.inner.WriteTrailer(ctx, upstreamErr)
+	tw, _ := m.tee.(*teeWriter)
+	if tw != nil {
+		tw.ResetCapture()
+	}
+
+	if err := m.inner.WriteTrailer(ctx, upstreamErr); err != nil {
+		return err
+	}
+
+	if tw != nil {
+		m.pushFragment(tw.CapturedBytes(), m.frag)
+	}
+
+	m.frag = pendingFragment{}
+
+	return nil
 }
 
 // Close flushes remaining data, validates the segment, and calls onClose.
@@ -129,6 +198,10 @@ func (m *SegmentMuxer) Close() error {
 
 	m.closed = true
 	endTime := time.Now().UTC()
+
+	if err := m.WriteTrailer(context.Background(), nil); err != nil {
+		return err
+	}
 
 	err := m.inner.Close()
 
@@ -154,12 +227,11 @@ func (m *SegmentMuxer) BytesWritten() int64 {
 	return m.writer.BytesWritten()
 }
 
-// teeWriter copies all writes to both the disk writer and the ring buffer.
-// The fMP4 muxer writes each fragment (emsg + moof + mdat) as a series of
-// Write calls. The tee captures each write and pushes it to the ring buffer.
+// teeWriter copies all writes to disk and captures bytes written during a
+// single muxer call so SegmentMuxer can push complete fragments to the ring.
 type teeWriter struct {
 	disk *AdaptiveWriter
-	ring *RingBuffer
+	buf  bytes.Buffer
 }
 
 func (t *teeWriter) Write(p []byte) (int, error) {
@@ -168,18 +240,64 @@ func (t *teeWriter) Write(p []byte) (int, error) {
 		return n, err
 	}
 
-	// Push raw bytes as a fragment to the ring buffer.
-	// Each fMP4 flush writes moof+mdat as a logical unit.
-	t.ring.Push(Fragment{
-		Data:      append([]byte(nil), p[:n]...),
-		Timestamp: time.Now(),
-	})
+	if n > 0 {
+		_, _ = t.buf.Write(p[:n])
+	}
 
 	return n, nil
+}
+
+func (t *teeWriter) ResetCapture() {
+	t.buf.Reset()
+}
+
+func (t *teeWriter) CapturedBytes() []byte {
+	if t.buf.Len() == 0 {
+		return nil
+	}
+
+	return append([]byte(nil), t.buf.Bytes()...)
 }
 
 // Close delegates to the underlying AdaptiveWriter so that fmp4.Muxer.Close()
 // properly flushes, fsyncs, and truncates the segment file.
 func (t *teeWriter) Close() error {
 	return t.disk.Close()
+}
+
+type pendingFragment struct {
+	valid     bool
+	dts       time.Duration
+	duration  time.Duration
+	keyFrame  bool
+	timestamp time.Time
+}
+
+func (p *pendingFragment) observe(pkt av.Packet) {
+	if !p.valid {
+		p.valid = true
+		p.dts = pkt.DTS
+		p.keyFrame = pkt.KeyFrame
+
+		p.timestamp = pkt.WallClockTime
+		if p.timestamp.IsZero() {
+			p.timestamp = time.Now()
+		}
+	}
+
+	p.duration += pkt.Duration
+}
+
+func (m *SegmentMuxer) pushFragment(data []byte, frag pendingFragment) {
+	if m.ring == nil || len(data) == 0 || !frag.valid {
+		return
+	}
+
+	m.ring.Push(Fragment{
+		DTS:       frag.dts,
+		Duration:  frag.duration,
+		KeyFrame:  frag.keyFrame,
+		Data:      data,
+		Timestamp: frag.timestamp,
+	})
 }

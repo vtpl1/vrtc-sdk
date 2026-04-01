@@ -272,7 +272,7 @@ func TestPacketHelpersAndFormatting(t *testing.T) {
 		PTSOffset:       33 * time.Millisecond,
 		Duration:        20 * time.Millisecond,
 		WallClockTime:   wall,
-		Data:            []byte{0x65}, // H264 IDR
+		Data:            []byte{0x00, 0x00, 0x00, 0x01, 0x65}, // AVCC H264 IDR
 	}
 
 	if got := pkt.PTS(); got != 1267*time.Millisecond {
@@ -333,7 +333,7 @@ func TestPacketStringForAudioAndH265AndSizes(t *testing.T) {
 		CodecType: H265,
 		DTS:       2 * time.Second,
 		Duration:  40 * time.Millisecond,
-		Data:      []byte{0x40}, // 0x40 >> 1 == 32 => VPS
+		Data:      []byte{0x00, 0x00, 0x00, 0x01, 0x40}, // AVCC H265 VPS
 	}
 	mustContain(t, h265.String(), "VPS")
 

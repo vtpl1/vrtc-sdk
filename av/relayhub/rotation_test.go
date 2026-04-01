@@ -36,13 +36,13 @@ func (m *rotatingMuxer) WritePacket(_ context.Context, pkt av.Packet) error {
 }
 
 func (m *rotatingMuxer) WriteTrailer(_ context.Context, _ error) error { return nil }
-func (m *rotatingMuxer) Close() error                                 { m.closed = true; return nil }
+func (m *rotatingMuxer) Close() error                                  { m.closed = true; return nil }
 
 // simpleDemuxer emits N keyframe packets then EOF.
 type simpleDemuxer struct {
 	streams []av.Stream
 	total   int
-	sent    int
+	sent    atomic.Int32
 }
 
 func (d *simpleDemuxer) GetCodecs(_ context.Context) ([]av.Stream, error) {
@@ -50,17 +50,20 @@ func (d *simpleDemuxer) GetCodecs(_ context.Context) ([]av.Stream, error) {
 }
 
 func (d *simpleDemuxer) ReadPacket(_ context.Context) (av.Packet, error) {
-	if d.sent >= d.total {
+	sent := int(d.sent.Load())
+	if sent >= d.total {
 		return av.Packet{}, io.EOF
 	}
-	d.sent++
+
+	sent = int(d.sent.Add(1))
+
 	return av.Packet{
 		KeyFrame:  true,
 		Idx:       0,
 		CodecType: av.H264,
-		DTS:       time.Duration(d.sent) * 33 * time.Millisecond,
+		DTS:       time.Duration(sent) * 33 * time.Millisecond,
 		Duration:  33 * time.Millisecond,
-		Data:      []byte{byte(d.sent)},
+		Data:      []byte{byte(sent)},
 	}, nil
 }
 
@@ -106,8 +109,15 @@ func TestConsumer_MuxerRotation(t *testing.T) {
 		t.Fatalf("Consume: %v", err)
 	}
 
-	// Wait for the demuxer to finish (10 packets → EOF → relay shuts down).
-	time.Sleep(1 * time.Second)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if int(dmx.sent.Load()) >= dmx.total {
+			break
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	_ = handle.Close(ctx)
 
 	// Verify: factory was called more than once (rotations occurred).

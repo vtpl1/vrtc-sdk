@@ -6,8 +6,9 @@ import (
 )
 
 // PacketReader defines the interface for reading compressed audio/video packets.
-// A returned Packet with non-nil NewCodecs signals a mid-stream codec change for
-// the listed streams; receivers must update their per-stream codec state accordingly.
+// A returned Packet with non-nil NewCodecs signals a mid-stream codec change and
+// carries the full replacement Stream list; receivers must replace their stored
+// codec state accordingly.
 type PacketReader interface {
 	ReadPacket(ctx context.Context) (Packet, error)
 }
@@ -17,8 +18,8 @@ type PacketReader interface {
 // Lifecycle:
 //  1. Call GetCodecs to obtain initial stream configuration.
 //  2. Loop on ReadPacket until io.EOF or context cancellation.
-//  3. Handle Packet.NewCodecs != nil for mid-stream codec changes (partial updates —
-//     only the listed streams changed; all others remain as returned by GetCodecs).
+//  3. Handle Packet.NewCodecs != nil for mid-stream codec changes (full replacement —
+//     the packet carries the complete current Stream list, not a partial delta).
 type Demuxer interface {
 	// GetCodecs reads the container header and returns the initial Stream list.
 	// Each Stream.Idx matches Packet.Idx for that track; indices may be non-contiguous.

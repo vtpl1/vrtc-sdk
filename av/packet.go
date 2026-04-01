@@ -1,6 +1,7 @@
 package av
 
 import (
+	"encoding/binary"
 	"fmt"
 	"strings"
 	"time"
@@ -44,8 +45,9 @@ type Packet struct {
 
 	// ── Codec change ──────────────────────────────────────────────────────
 	// NewCodecs is non-nil on the keyframe packet that immediately follows a
-	// parameter-set change. Contains only the streams whose codec changed.
-	// Receivers must update per-stream codec state when this is non-nil.
+	// parameter-set change. It carries the full replacement Stream list for the
+	// current stream set. Receivers must replace their per-stream codec state when
+	// this is non-nil.
 	NewCodecs []Stream
 }
 
@@ -90,11 +92,13 @@ func (m *Packet) String() string {
 	}
 
 	if m.CodecType.IsVideo() && len(m.Data) > 0 {
-		switch m.CodecType {
-		case H264:
-			fmt.Fprintf(&b, " %s", H264NaluType(m.Data[0])&H264NALTypeMask)
-		case H265:
-			fmt.Fprintf(&b, " %s", H265NaluType(m.Data[0]>>1)&H265NALTypeMask)
+		if naluHeader, ok := firstVideoNaluHeader(m.CodecType, m.Data); ok {
+			switch m.CodecType {
+			case H264:
+				fmt.Fprintf(&b, " %s", H264NaluType(naluHeader)&H264NALTypeMask)
+			case H265:
+				fmt.Fprintf(&b, " %s", H265NaluType(naluHeader>>1)&H265NALTypeMask)
+			}
 		}
 	}
 
@@ -111,6 +115,24 @@ func packetSizeString(n int) string {
 	default:
 		return fmt.Sprintf("%dB", n)
 	}
+}
+
+func firstVideoNaluHeader(codecType CodecType, data []byte) (byte, bool) {
+	if len(data) == 0 {
+		return 0, false
+	}
+
+	switch codecType {
+	case H264, H265:
+		if len(data) >= 5 {
+			naluSize := binary.BigEndian.Uint32(data[:4])
+			if naluSize > 0 && len(data) >= int(4+naluSize) {
+				return data[4], true
+			}
+		}
+	}
+
+	return data[0], true
 }
 
 // GoString returns a detailed developer-friendly representation of the packet.

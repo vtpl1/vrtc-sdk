@@ -25,19 +25,20 @@ func parseSenderReports(payload []byte) ([]senderReport, error) {
 
 	for len(payload) > 0 {
 		if len(payload) < rtcpHeaderLength {
-			return nil, fmt.Errorf("rtsp: RTCP packet too short")
+			return nil, errRTCPPacketTooShort
 		}
 
 		version := payload[0] >> 6
 		if version != rtcpVersion {
-			return nil, fmt.Errorf("rtsp: unsupported RTCP version %d", version)
+			return nil, fmt.Errorf("%w: %d", errUnsupportedRTCPVersion, version)
 		}
 
 		packetType := payload[1]
 		packetLengthWords := binary.BigEndian.Uint16(payload[2:4])
+
 		packetLength := int(packetLengthWords+1) * 4
 		if packetLength < rtcpHeaderLength || packetLength > len(payload) {
-			return nil, fmt.Errorf("rtsp: invalid RTCP packet length")
+			return nil, errInvalidRTCPPacketLength
 		}
 
 		packet := payload[:packetLength]
@@ -58,7 +59,7 @@ func parseSenderReports(payload []byte) ([]senderReport, error) {
 
 func parseSenderReport(packet []byte) (senderReport, error) {
 	if len(packet) < rtcpHeaderLength+rtcpSenderReportLength {
-		return senderReport{}, fmt.Errorf("rtsp: RTCP sender report too short")
+		return senderReport{}, errRTCPSenderReportTooShort
 	}
 
 	body := packet[rtcpHeaderLength:]

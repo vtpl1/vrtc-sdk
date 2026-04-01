@@ -2,7 +2,6 @@ package rtsp
 
 import (
 	"encoding/binary"
-	"fmt"
 	"strconv"
 
 	"github.com/pion/rtp"
@@ -17,17 +16,17 @@ type aacRTPDecoder struct {
 func newAACRTPDecoder(fmtp map[string]string) (*aacRTPDecoder, error) {
 	sizeLength, err := strconv.Atoi(fmtp["sizelength"])
 	if err != nil || sizeLength <= 0 {
-		return nil, fmt.Errorf("rtsp: invalid AAC sizelength")
+		return nil, errInvalidAACSizelength
 	}
 
 	indexLength, err := strconv.Atoi(fmtp["indexlength"])
 	if err != nil || indexLength < 0 {
-		return nil, fmt.Errorf("rtsp: invalid AAC indexlength")
+		return nil, errInvalidAACIndexlength
 	}
 
 	indexDeltaLength, err := strconv.Atoi(fmtp["indexdeltalength"])
 	if err != nil || indexDeltaLength < 0 {
-		return nil, fmt.Errorf("rtsp: invalid AAC indexdeltalength")
+		return nil, errInvalidAACIndexdeltalength
 	}
 
 	return &aacRTPDecoder{
@@ -39,7 +38,7 @@ func newAACRTPDecoder(fmtp map[string]string) (*aacRTPDecoder, error) {
 
 func (d *aacRTPDecoder) Decode(pkt *rtp.Packet) ([][]byte, error) {
 	if len(pkt.Payload) < 2 {
-		return nil, fmt.Errorf("rtsp: AAC payload too short")
+		return nil, errAACPayloadTooShort
 	}
 
 	auHeadersBits := int(binary.BigEndian.Uint16(pkt.Payload[:2]))
@@ -49,7 +48,7 @@ func (d *aacRTPDecoder) Decode(pkt *rtp.Packet) ([][]byte, error) {
 
 	auHeaderBytes := (auHeadersBits + 7) / 8
 	if len(pkt.Payload) < 2+auHeaderBytes {
-		return nil, fmt.Errorf("rtsp: AAC AU headers truncated")
+		return nil, errAACAUHeadersTruncated
 	}
 
 	headerData := pkt.Payload[2 : 2+auHeaderBytes]
@@ -74,7 +73,7 @@ func (d *aacRTPDecoder) Decode(pkt *rtp.Packet) ([][]byte, error) {
 		}
 
 		if indexBits > remainingBits {
-			return nil, fmt.Errorf("rtsp: AAC AU index bits exceed header length")
+			return nil, errAACAUIndexBitsExceedHeaderLength
 		}
 
 		if _, err := reader.readBits(indexBits); err != nil {
@@ -82,15 +81,17 @@ func (d *aacRTPDecoder) Decode(pkt *rtp.Packet) ([][]byte, error) {
 		}
 
 		remainingBits -= indexBits
+
 		sizes = append(sizes, size)
 		first = false
 	}
 
 	aus := make([][]byte, 0, len(sizes))
+
 	offset := 0
 	for _, size := range sizes {
 		if size < 0 || offset+size > len(payloadData) {
-			return nil, fmt.Errorf("rtsp: AAC AU payload truncated")
+			return nil, errAACAUPayloadTruncated
 		}
 
 		aus = append(aus, append([]byte(nil), payloadData[offset:offset+size]...))
@@ -111,11 +112,12 @@ func (r *bitReader) readBits(n int) (int, error) {
 	}
 
 	if n < 0 || r.pos+n > len(r.data)*8 {
-		return 0, fmt.Errorf("rtsp: bit reader overflow")
+		return 0, errBitReaderOverflow
 	}
 
 	v := 0
-	for i := 0; i < n; i++ {
+
+	for i := range n {
 		bytePos := (r.pos + i) / 8
 		bitPos := 7 - ((r.pos + i) % 8)
 		v = (v << 1) | int((r.data[bytePos]>>bitPos)&0x01)

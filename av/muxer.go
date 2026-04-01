@@ -33,8 +33,8 @@ type MuxCloser interface {
 }
 
 // CodecChanger is an optional capability a Muxer may implement to handle mid-stream
-// codec changes. When a Packet carries non-nil NewCodecs, CopyPackets forwards only
-// the changed Stream entries here. Unchanged streams are unaffected.
+// codec changes. When a Packet carries non-nil NewCodecs, callers forward the
+// complete current Stream list here so the muxer can replace its codec state.
 // Muxers that do not implement CodecChanger silently ignore codec-change packets.
 type CodecChanger interface {
 	WriteCodecChange(ctx context.Context, changed []Stream) error

@@ -120,7 +120,8 @@ func (d *Demuxer) GetCodecs(_ context.Context) ([]av.Stream, error) {
 
 // ReadPacket returns the next av.Packet from the stream. Returns io.EOF when
 // the stream ends. Packet.NewCodecs is non-nil when a mid-stream codec change
-// was signalled by a subsequent moov box in the stream.
+// was signalled by a subsequent moov box in the stream; it carries the full
+// replacement Stream list.
 func (d *Demuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 	for {
 		if ctx.Err() != nil {
@@ -567,6 +568,7 @@ func parseStsdEntry(data []byte, _ string) (av.CodecData, bool, error) {
 		}
 
 		sampleRateFP := binary.BigEndian.Uint32(entryPayload[24:28])
+
 		sampleRate := sampleRateFP >> 16
 		if sampleRate == 0 {
 			return nil, false, ErrMalformed
@@ -577,7 +579,11 @@ func parseStsdEntry(data []byte, _ string) (av.CodecData, bool, error) {
 			return nil, false, ErrMalformed
 		}
 
-		return pcm.NewFLACCodecData(av.FLAC, sampleRate, channelLayoutFromCount(chCount)), false, nil
+		return pcm.NewFLACCodecData(
+			av.FLAC,
+			sampleRate,
+			channelLayoutFromCount(chCount),
+		), false, nil
 
 	default:
 		return nil, false, fmt.Errorf(

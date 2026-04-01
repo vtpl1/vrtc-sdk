@@ -80,14 +80,14 @@ type trackState struct {
 // Muxer serialises Packets into a Fragmented MP4 byte stream.
 // Use NewMuxer to construct.
 type Muxer struct {
-	w        io.Writer
-	tracks   []*trackState          // ordered by writeHeader stream order
-	trackMap map[uint16]*trackState // keyed by av.Stream.Idx
-	seqNum   uint32
-	emsgID   uint32 // monotonically increasing emsg event id
-	written      bool // WriteHeader has been called
-	closed       bool // WriteTrailer has been called
-	writerClosed bool // Close has been called
+	w            io.Writer
+	tracks       []*trackState          // ordered by writeHeader stream order
+	trackMap     map[uint16]*trackState // keyed by av.Stream.Idx
+	seqNum       uint32
+	emsgID       uint32 // monotonically increasing emsg event id
+	written      bool   // WriteHeader has been called
+	closed       bool   // WriteTrailer has been called
+	writerClosed bool   // Close has been called
 
 	// dtsOffset is the DTS of the very first packet received; it is subtracted
 	// from all subsequent timestamps so the output timeline starts at zero.
@@ -256,8 +256,8 @@ func (m *Muxer) Close() error {
 
 // WriteCodecChange implements av.CodecChanger. It flushes the current fragment,
 // updates the codec for each listed stream, then writes a new init segment so
-// downstream decoders can reinitialise. Only the streams listed in changed are
-// updated; all others remain as declared in WriteHeader.
+// downstream decoders can reinitialise. Callers pass the full replacement
+// Stream list; streams unknown to this muxer are ignored.
 func (m *Muxer) WriteCodecChange(_ context.Context, changed []av.Stream) error {
 	if !m.written || m.closed {
 		return nil

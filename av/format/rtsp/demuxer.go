@@ -11,12 +11,15 @@ package rtsp
 import (
 	"bufio"
 	"context"
-	"crypto/md5"
+	md5 "crypto/md5" //nolint:gosec // RTSP Digest auth requires MD5 for interoperability.
+	crand "crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
-	"math/rand"
+	"maps"
 	"net"
 	"net/textproto"
 	"net/url"
@@ -110,7 +113,7 @@ func (d *Demuxer) GetCodecs(ctx context.Context) ([]av.Stream, error) {
 	}
 
 	if sourceURL.Scheme != "rtsp" && sourceURL.Scheme != "rtsps" {
-		return nil, fmt.Errorf("rtsp: unsupported URL scheme: %s", sourceURL.Scheme)
+		return nil, fmt.Errorf("%w: %s", errUnsupportedURLScheme, sourceURL.Scheme)
 	}
 
 	conn, err := d.dial(ctx, sourceURL)
@@ -129,27 +132,27 @@ func (d *Demuxer) GetCodecs(ctx context.Context) ([]av.Stream, error) {
 	}
 
 	if err := d.options(ctx, sourceURL); err != nil {
-		_ = d.closeLocked()
+		_ = d.closeLocked(ctx)
 
 		return nil, err
 	}
 
 	sdpBody, err := d.describe(ctx, sourceURL)
 	if err != nil {
-		_ = d.closeLocked()
+		_ = d.closeLocked(ctx)
 
 		return nil, err
 	}
 
 	tracks, streams, err := d.buildTracks(sdpBody)
 	if err != nil {
-		_ = d.closeLocked()
+		_ = d.closeLocked(ctx)
 
 		return nil, err
 	}
 
 	if len(tracks) == 0 {
-		_ = d.closeLocked()
+		_ = d.closeLocked(ctx)
 
 		return nil, ErrNoSupportedTrack
 	}
@@ -158,7 +161,7 @@ func (d *Demuxer) GetCodecs(ctx context.Context) ([]av.Stream, error) {
 		tr.rtpChannel = uint8(idx * 2)
 
 		if err := d.setupTrack(ctx, sourceURL, tr); err != nil {
-			_ = d.closeLocked()
+			_ = d.closeLocked(ctx)
 
 			return nil, err
 		}
@@ -170,7 +173,7 @@ func (d *Demuxer) GetCodecs(ctx context.Context) ([]av.Stream, error) {
 	}
 
 	if err := d.play(ctx, sourceURL); err != nil {
-		_ = d.closeLocked()
+		_ = d.closeLocked(ctx)
 
 		return nil, err
 	}
@@ -247,13 +250,15 @@ func (d *Demuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 
 		ch, payload, err := readInterleavedFrame(reader)
 		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			var ne net.Error
+			if errors.As(err, &ne) {
 				continue
 			}
 
 			d.mu.Lock()
 			rerr := d.reconnectLocked(ctx)
 			d.mu.Unlock()
+
 			if rerr == nil {
 				continue
 			}
@@ -284,31 +289,7 @@ func (d *Demuxer) Close() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	return d.closeLocked()
-}
-
-func (d *Demuxer) closeLocked() error {
-	if d.closed {
-		return nil
-	}
-	d.closed = true
-
-	d.resumeReadersLocked()
-
-	var retErr error
-
-	if d.conn != nil {
-		if d.started && d.baseURL != nil {
-			// best effort teardown
-			_, _ = d.doRequest(context.Background(), "TEARDOWN", d.baseURL.String(), nil, nil)
-		}
-
-		if err := d.conn.Close(); err != nil {
-			retErr = err
-		}
-	}
-
-	return retErr
+	return d.closeLocked(context.Background())
 }
 
 // Pause implements av.Pauser. It sends a RTSP PAUSE when the session is
@@ -349,6 +330,7 @@ func (d *Demuxer) Resume(ctx context.Context) error {
 		if err := d.play(ctx, d.baseURL); err != nil {
 			return err
 		}
+
 		d.pendingDiscontinuity = true
 		d.keepAliveAt = d.timeNow().Add(d.keepAliveFor)
 	}
@@ -362,6 +344,31 @@ func (d *Demuxer) Resume(ctx context.Context) error {
 // IsPaused implements av.Pauser.
 func (d *Demuxer) IsPaused() bool {
 	return d.paused.Load()
+}
+
+func (d *Demuxer) closeLocked(ctx context.Context) error {
+	if d.closed {
+		return nil
+	}
+
+	d.closed = true
+
+	d.resumeReadersLocked()
+
+	var retErr error
+
+	if d.conn != nil {
+		if d.started && d.baseURL != nil {
+			teardownCtx := context.WithoutCancel(ctx)
+			_, _ = d.doRequest(teardownCtx, "TEARDOWN", d.baseURL.String(), nil)
+		}
+
+		if err := d.conn.Close(); err != nil {
+			retErr = err
+		}
+	}
+
+	return retErr
 }
 
 func (d *Demuxer) dial(ctx context.Context, u *url.URL) (net.Conn, error) {
@@ -381,13 +388,13 @@ func (d *Demuxer) dial(ctx context.Context, u *url.URL) (net.Conn, error) {
 }
 
 func (d *Demuxer) options(ctx context.Context, u *url.URL) error {
-	resp, err := d.doRequest(ctx, "OPTIONS", u.String(), nil, nil)
+	resp, err := d.doRequest(ctx, "OPTIONS", u.String(), nil)
 	if err != nil {
 		return err
 	}
 
 	if resp.statusCode != 200 {
-		return fmt.Errorf("rtsp: OPTIONS failed: %d %s", resp.statusCode, resp.status)
+		return statusError(errOptionsFailed, resp)
 	}
 
 	return nil
@@ -398,13 +405,13 @@ func (d *Demuxer) describe(ctx context.Context, u *url.URL) (string, error) {
 		"Accept": "application/sdp",
 	}
 
-	resp, err := d.doRequest(ctx, "DESCRIBE", u.String(), headers, nil)
+	resp, err := d.doRequest(ctx, "DESCRIBE", u.String(), headers)
 	if err != nil {
 		return "", err
 	}
 
 	if resp.statusCode != 200 {
-		return "", fmt.Errorf("rtsp: DESCRIBE failed: %d %s", resp.statusCode, resp.status)
+		return "", statusError(errDescribeFailed, resp)
 	}
 
 	contentBase := resp.headers.Get("Content-Base")
@@ -420,20 +427,24 @@ func (d *Demuxer) describe(ctx context.Context, u *url.URL) (string, error) {
 func (d *Demuxer) setupTrack(ctx context.Context, reqURL *url.URL, tr *rtspTrack) error {
 	setupURL := resolveControlURL(reqURL, tr.controlURL)
 	headers := map[string]string{
-		"Transport": fmt.Sprintf("RTP/AVP/TCP;unicast;interleaved=%d-%d", tr.rtpChannel, tr.rtpChannel+1),
+		"Transport": fmt.Sprintf(
+			"RTP/AVP/TCP;unicast;interleaved=%d-%d",
+			tr.rtpChannel,
+			tr.rtpChannel+1,
+		),
 	}
 
 	if d.sessionID != "" {
 		headers["Session"] = d.sessionID
 	}
 
-	resp, err := d.doRequest(ctx, "SETUP", setupURL, headers, nil)
+	resp, err := d.doRequest(ctx, "SETUP", setupURL, headers)
 	if err != nil {
 		return err
 	}
 
 	if resp.statusCode != 200 {
-		return fmt.Errorf("rtsp: SETUP failed: %d %s", resp.statusCode, resp.status)
+		return statusError(errSetupFailed, resp)
 	}
 
 	if d.sessionID == "" {
@@ -454,13 +465,13 @@ func (d *Demuxer) play(ctx context.Context, u *url.URL) error {
 		headers["Session"] = d.sessionID
 	}
 
-	resp, err := d.doRequest(ctx, "PLAY", u.String(), headers, nil)
+	resp, err := d.doRequest(ctx, "PLAY", u.String(), headers)
 	if err != nil {
 		return err
 	}
 
 	if resp.statusCode != 200 {
-		return fmt.Errorf("rtsp: PLAY failed: %d %s", resp.statusCode, resp.status)
+		return statusError(errPlayFailed, resp)
 	}
 
 	return nil
@@ -472,13 +483,13 @@ func (d *Demuxer) pause(ctx context.Context, u *url.URL) error {
 		headers["Session"] = d.sessionID
 	}
 
-	resp, err := d.doRequest(ctx, "PAUSE", u.String(), headers, nil)
+	resp, err := d.doRequest(ctx, "PAUSE", u.String(), headers)
 	if err != nil {
 		return err
 	}
 
 	if resp.statusCode != 200 {
-		return fmt.Errorf("rtsp: PAUSE failed: %d %s", resp.statusCode, resp.status)
+		return statusError(errPauseFailed, resp)
 	}
 
 	return nil
@@ -489,13 +500,12 @@ func (d *Demuxer) doRequest(
 	method string,
 	requestURI string,
 	extraHeaders map[string]string,
-	body []byte,
 ) (*rtspResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	for attempt := 0; attempt < 2; attempt++ {
+	for range 2 {
 		cseq := d.requestID
 		d.requestID++
 
@@ -507,19 +517,13 @@ func (d *Demuxer) doRequest(
 			headers["Session"] = d.sessionID
 		}
 
-		for k, v := range extraHeaders {
-			headers[k] = v
-		}
+		maps.Copy(headers, extraHeaders)
 
 		if auth := d.auth.authorization(method, requestURI); auth != "" {
 			headers["Authorization"] = auth
 		}
 
-		if len(body) > 0 {
-			headers["Content-Length"] = strconv.Itoa(len(body))
-		}
-
-		if err := writeRTSPRequest(d.conn, method, requestURI, headers, body); err != nil {
+		if err := writeRTSPRequest(d.conn, method, requestURI, headers, nil); err != nil {
 			return nil, fmt.Errorf("rtsp: write %s: %w", method, err)
 		}
 
@@ -528,14 +532,15 @@ func (d *Demuxer) doRequest(
 			return nil, fmt.Errorf("rtsp: read %s response: %w", method, err)
 		}
 
-		if resp.statusCode == 401 && d.auth.canAttemptAuth() && d.auth.applyChallenge(resp.headers.Get("WWW-Authenticate")) {
+		if resp.statusCode == 401 && d.auth.canAttemptAuth() &&
+			d.auth.applyChallenge(resp.headers.Get("WWW-Authenticate")) {
 			continue
 		}
 
 		return resp, nil
 	}
 
-	return nil, fmt.Errorf("rtsp: authentication failed")
+	return nil, errAuthenticationFailed
 }
 
 func (d *Demuxer) readRTSPResponseLocked(ctx context.Context) (*rtspResponse, error) {
@@ -592,7 +597,7 @@ func (d *Demuxer) keepAliveLocked(ctx context.Context) error {
 		headers["Session"] = d.sessionID
 	}
 
-	resp, err := d.doRequest(ctx, "SET_PARAMETER", d.baseURL.String(), headers, nil)
+	resp, err := d.doRequest(ctx, "SET_PARAMETER", d.baseURL.String(), headers)
 	if err != nil {
 		return err
 	}
@@ -602,16 +607,16 @@ func (d *Demuxer) keepAliveLocked(ctx context.Context) error {
 	}
 
 	if resp.statusCode != 405 && resp.statusCode != 451 && resp.statusCode != 501 {
-		return fmt.Errorf("rtsp: SET_PARAMETER keepalive failed: %d %s", resp.statusCode, resp.status)
+		return statusError(errKeepAliveSetParameterFailed, resp)
 	}
 
-	resp, err = d.doRequest(ctx, "OPTIONS", d.baseURL.String(), headers, nil)
+	resp, err = d.doRequest(ctx, "OPTIONS", d.baseURL.String(), headers)
 	if err != nil {
 		return err
 	}
 
 	if resp.statusCode != 200 {
-		return fmt.Errorf("rtsp: OPTIONS keepalive failed: %d %s", resp.statusCode, resp.status)
+		return statusError(errKeepAliveOptionsFailed, resp)
 	}
 
 	return nil
@@ -639,6 +644,7 @@ func (d *Demuxer) reconnectLocked(ctx context.Context) error {
 	d.requestID = 1
 	d.sessionID = ""
 	d.baseURL = sourceURL
+
 	d.auth = authState{username: sourceURL.User.Username()}
 	if pw, ok := sourceURL.User.Password(); ok {
 		d.auth.password = pw
@@ -772,11 +778,11 @@ func newTrack(idx uint16, cd av.CodecData) (*rtspTrack, error) {
 		case av.PCM_MULAW, av.PCM_ALAW, av.OPUS:
 			// No additional depacketizer state required.
 		default:
-			return nil, fmt.Errorf("unsupported audio codec type: %s", v.Type())
+			return nil, fmt.Errorf("%w: %s", errUnsupportedAudioCodecType, v.Type())
 		}
 
 	default:
-		return nil, fmt.Errorf("unsupported codec type: %s", cd.Type())
+		return nil, fmt.Errorf("%w: %s", errUnsupportedCodecType, cd.Type())
 	}
 
 	return tr, nil
@@ -802,7 +808,7 @@ func (t *rtspTrack) decodeRTP(pkt *rtp.Packet) ([]av.Packet, error) {
 	case av.AAC:
 		out, err = t.decodeAAC(pkt, dts)
 	case av.PCM_MULAW, av.PCM_ALAW, av.OPUS:
-		out, err = t.decodeAudio(pkt.Payload, dts)
+		out = t.decodeAudio(pkt.Payload, dts)
 	default:
 		return nil, nil
 	}
@@ -897,7 +903,7 @@ func (t *rtspTrack) decodeH265(pkt *rtp.Packet, dts time.Duration) ([]av.Packet,
 
 func (t *rtspTrack) decodeAAC(pkt *rtp.Packet, dts time.Duration) ([]av.Packet, error) {
 	if t.aacDecoder == nil {
-		return nil, fmt.Errorf("rtsp: missing AAC depacketizer")
+		return nil, errMissingAACDepacketizer
 	}
 
 	aus, err := t.aacDecoder.Decode(pkt)
@@ -931,7 +937,7 @@ func (t *rtspTrack) decodeAAC(pkt *rtp.Packet, dts time.Duration) ([]av.Packet, 
 	return out, nil
 }
 
-func (t *rtspTrack) decodeAudio(payload []byte, dts time.Duration) ([]av.Packet, error) {
+func (t *rtspTrack) decodeAudio(payload []byte, dts time.Duration) []av.Packet {
 	dur := t.packetDuration(payload)
 
 	out := av.Packet{
@@ -946,7 +952,7 @@ func (t *rtspTrack) decodeAudio(payload []byte, dts time.Duration) ([]av.Packet,
 	t.haveLastDTS = true
 	t.lastDur = dur
 
-	return []av.Packet{out}, nil
+	return []av.Packet{out}
 }
 
 func (t *rtspTrack) estimateDuration(data []byte, dts time.Duration) time.Duration {
@@ -959,7 +965,7 @@ func (t *rtspTrack) estimateDuration(data []byte, dts time.Duration) time.Durati
 	}
 
 	if pd, ok := t.codec.(interface {
-		PacketDuration([]byte) (time.Duration, error)
+		PacketDuration(pkt []byte) (time.Duration, error)
 	}); ok {
 		d, err := pd.PacketDuration(data)
 		if err == nil && d > 0 {
@@ -1042,6 +1048,7 @@ func carryTrackState(oldTracks []*rtspTrack, newTracks []*rtspTrack) {
 		for _, candidate := range oldTracks {
 			if candidate.codecType == next.codecType && candidate.controlURL == next.controlURL {
 				prev = candidate
+
 				break
 			}
 		}
@@ -1295,7 +1302,7 @@ func readInterleavedFrame(r *bufio.Reader) (uint8, []byte, error) {
 
 	n := int(binary.BigEndian.Uint16(lenBuf[:]))
 	if n <= 0 {
-		return 0, nil, fmt.Errorf("rtsp: empty interleaved frame")
+		return 0, nil, errEmptyInterleavedFrame
 	}
 
 	payload := make([]byte, n)
@@ -1359,6 +1366,8 @@ func (a *authState) applyChallenge(header string) bool {
 
 func (a *authState) authorization(method string, uri string) string {
 	switch a.kind {
+	case authNone:
+		return ""
 	case authBasic:
 		plain := a.username + ":" + a.password
 
@@ -1368,28 +1377,27 @@ func (a *authState) authorization(method string, uri string) string {
 		a.nc++
 
 		ncHex := fmt.Sprintf("%08x", a.nc)
-		cnonce := fmt.Sprintf("%08x", rand.Uint32())
+		cnonce := randomHex(4)
+
+		if cnonce == "" {
+			return ""
+		}
 
 		ha1 := md5Hex(a.username + ":" + a.realm + ":" + a.password)
 		ha2 := md5Hex(method + ":" + uri)
 
-		response := ""
 		if strings.Contains(strings.ToLower(a.qop), "auth") {
-			response = md5Hex(ha1 + ":" + a.nonce + ":" + ncHex + ":" + cnonce + ":auth:" + ha2)
-
 			return fmt.Sprintf(
 				`Digest username="%s", realm="%s", nonce="%s", uri="%s", response="%s", qop=auth, nc=%s, cnonce="%s"`,
 				a.username,
 				a.realm,
 				a.nonce,
 				uri,
-				response,
+				md5Hex(ha1+":"+a.nonce+":"+ncHex+":"+cnonce+":auth:"+ha2),
 				ncHex,
 				cnonce,
 			)
 		}
-
-		response = md5Hex(ha1 + ":" + a.nonce + ":" + ha2)
 
 		return fmt.Sprintf(
 			`Digest username="%s", realm="%s", nonce="%s", uri="%s", response="%s"`,
@@ -1397,7 +1405,7 @@ func (a *authState) authorization(method string, uri string) string {
 			a.realm,
 			a.nonce,
 			uri,
-			response,
+			md5Hex(ha1+":"+a.nonce+":"+ha2),
 		)
 	}
 
@@ -1407,8 +1415,8 @@ func (a *authState) authorization(method string, uri string) string {
 func parseAuthParams(s string) map[string]string {
 	out := make(map[string]string)
 
-	parts := strings.Split(s, ",")
-	for _, raw := range parts {
+	parts := strings.SplitSeq(s, ",")
+	for raw := range parts {
 		kv := strings.SplitN(strings.TrimSpace(raw), "=", 2)
 		if len(kv) != 2 {
 			continue
@@ -1422,8 +1430,22 @@ func parseAuthParams(s string) map[string]string {
 	return out
 }
 
+func statusError(base error, resp *rtspResponse) error {
+	return fmt.Errorf("%w: %d %s", base, resp.statusCode, resp.status)
+}
+
+func randomHex(n int) string {
+	buf := make([]byte, n)
+	if _, err := crand.Read(buf); err != nil {
+		return ""
+	}
+
+	return hex.EncodeToString(buf)
+}
+
+//nolint:gosec // RTSP Digest auth requires MD5 for interoperability with legacy servers.
 func md5Hex(s string) string {
 	sum := md5.Sum([]byte(s))
 
-	return fmt.Sprintf("%x", sum)
+	return hex.EncodeToString(sum[:])
 }

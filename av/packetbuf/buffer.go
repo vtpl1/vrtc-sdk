@@ -72,17 +72,6 @@ func (b *Buffer) Close() {
 	}
 }
 
-func (b *Buffer) evictLocked() {
-	cutoff := time.Now().Add(-b.maxAge)
-	i := 0
-	for i < len(b.pkts) && b.pkts[i].WallClockTime.Before(cutoff) {
-		i++
-	}
-	if i > 0 {
-		b.pkts = b.pkts[i:]
-	}
-}
-
 // Demuxer returns a DemuxCloser that replays buffered packets with
 // WallClockTime >= since, then follows new packets in real time until
 // the Buffer is closed or the Demuxer's context is cancelled.
@@ -90,12 +79,25 @@ func (b *Buffer) Demuxer(since time.Time) av.DemuxCloser {
 	return &bufDemuxer{buf: b, since: since}
 }
 
+func (b *Buffer) evictLocked() {
+	cutoff := time.Now().Add(-b.maxAge)
+
+	i := 0
+	for i < len(b.pkts) && b.pkts[i].WallClockTime.Before(cutoff) {
+		i++
+	}
+
+	if i > 0 {
+		b.pkts = b.pkts[i:]
+	}
+}
+
 // --- DemuxCloser implementation ---
 
 type bufDemuxer struct {
 	buf     *Buffer
 	since   time.Time
-	cursor  int  // index into snapshot; -1 = not started
+	cursor  int // index into snapshot; -1 = not started
 	started bool
 	done    atomic.Bool
 }
@@ -103,9 +105,11 @@ type bufDemuxer struct {
 func (d *bufDemuxer) GetCodecs(ctx context.Context) ([]av.Stream, error) {
 	d.buf.mu.RLock()
 	defer d.buf.mu.RUnlock()
+
 	if len(d.buf.streams) == 0 {
 		return nil, io.EOF
 	}
+
 	return d.buf.streams, nil
 }
 
@@ -127,12 +131,14 @@ func (d *bufDemuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 			for d.cursor < len(pkts) && pkts[d.cursor].WallClockTime.Before(d.since) {
 				d.cursor++
 			}
+
 			d.started = true
 		}
 
 		if d.cursor < len(pkts) {
 			pkt := pkts[d.cursor]
 			d.cursor++
+
 			return pkt, nil
 		}
 
@@ -152,5 +158,6 @@ func (d *bufDemuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 
 func (d *bufDemuxer) Close() error {
 	d.done.Store(true)
+
 	return nil
 }

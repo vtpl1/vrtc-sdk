@@ -125,7 +125,10 @@ type sliceSource struct {
 // for each element in ids, one at a time, in order. It returns io.EOF after
 // the last element. The open function is called lazily — only when Next is
 // invoked for that element.
-func SliceSource(ids []string, open func(ctx context.Context, id string) (av.DemuxCloser, error)) SegmentSource {
+func SliceSource(
+	ids []string,
+	open func(ctx context.Context, id string) (av.DemuxCloser, error),
+) SegmentSource {
 	return &sliceSource{ids: ids, open: open}
 }
 

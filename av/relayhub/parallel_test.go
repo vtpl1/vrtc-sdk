@@ -979,7 +979,7 @@ func TestPauseResumeDuringConsumerChurn(t *testing.T) {
 
 // codecChangingDemuxer emits a normal stream of packets and embeds a
 // NewCodecs field in the packet at index changeAfter, simulating a mid-stream
-// codec renegotiation.
+// codec renegotiation with a full replacement stream list.
 type codecChangingDemuxer struct {
 	streams     []av.Stream
 	newStreams  []av.Stream
@@ -1319,7 +1319,7 @@ func TestCodecChangeForwardedToCodecChanger(t *testing.T) {
 	t.Errorf("WriteCodecChange was not called on the CodecChanger muxer within 3 s (changeAfter=%d)", changeAfter)
 }
 
-func TestRelayStatsPreserveFullStreamSetAfterPartialCodecChange(t *testing.T) {
+func TestRelayStatsPreserveFullStreamSetAfterCodecChange(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -1352,13 +1352,24 @@ func TestRelayStatsPreserveFullStreamSetAfterPartialCodecChange(t *testing.T) {
 	demuxFactory := func(_ context.Context, _ string) (av.DemuxCloser, error) {
 		return &codecChangingDemuxer{
 			streams: initialStreams,
-			newStreams: []av.Stream{{
-				Idx: 1,
-				Codec: fakeAudioCodec{
-					typ:        av.OPUS,
-					sampleRate: changedAudio,
+			newStreams: []av.Stream{
+				{
+					Idx: 0,
+					Codec: fakeVideoCodec{
+						typ:       av.H264,
+						width:     initialWidth,
+						height:    initialHeight,
+						timeScale: 90000,
+					},
 				},
-			}},
+				{
+					Idx: 1,
+					Codec: fakeAudioCodec{
+						typ:        av.OPUS,
+						sampleRate: changedAudio,
+					},
+				},
+			},
 			changeAfter: changeAfter,
 		}, nil
 	}
@@ -1405,11 +1416,11 @@ func TestRelayStatsPreserveFullStreamSetAfterPartialCodecChange(t *testing.T) {
 
 		if streams[0].Idx != 0 || streams[0].CodecType != av.H264 ||
 			streams[0].Width != initialWidth || streams[0].Height != initialHeight {
-			t.Fatalf("video stream metadata lost after partial codec change: %+v", streams[0])
+			t.Fatalf("video stream metadata lost after codec change: %+v", streams[0])
 		}
 
 		if streams[1].Idx != 1 || streams[1].CodecType != av.OPUS {
-			t.Fatalf("audio stream metadata changed unexpectedly after partial codec change: %+v", streams[1])
+			t.Fatalf("audio stream metadata changed unexpectedly after codec change: %+v", streams[1])
 		}
 
 		if streams[1].SampleRate != changedAudio {
@@ -1421,7 +1432,7 @@ func TestRelayStatsPreserveFullStreamSetAfterPartialCodecChange(t *testing.T) {
 		return
 	}
 
-	t.Fatalf("GetRelayStats did not retain the full stream set after partial codec change")
+	t.Fatalf("GetRelayStats did not retain the full stream set after codec change")
 }
 
 // =============================================================================
