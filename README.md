@@ -142,6 +142,100 @@ defer handle.Close(ctx)
 | 1 | Blocking write — back-pressure propagates to `ReadPacket`; no frames are dropped |
 | 2+ | Leaky write — a slow consumer drops frames rather than stalling others |
 
+**Operational notes**
+
+- `Start(ctx)` must be called before `Consume`; otherwise `Consume` returns `ErrRelayHubNotStartedYet`.
+- The first `Consume` for a `sourceID` creates a relay, queues it for startup, waits for `GetCodecs`, primes the consumer with the initial stream list, and then returns the consumer handle.
+- If the demuxer factory or initial `GetCodecs` call fails during startup, the relay stores that error and later `Consume` calls return it wrapped with `ErrRelayLastError`.
+- If a running relay later fails during `ReadPacket`, the relay shuts down and is reclaimed by the hub cleanup loop; that read error is not persisted in `RelayStats.LastError`.
+- `PauseRelay` and `ResumeRelay` forward to the underlying demuxer only when it implements `av.Pauser`; otherwise they are no-ops.
+- `Stop()` cancels the hub context, closes all active relays, and waits for relay and consumer goroutines to exit.
+
+### Relay stats
+
+`GetRelayStats(ctx)` returns one `av.RelayStats` per active relay:
+
+```go
+type RelayStats struct {
+    ID             string
+    ConsumerCount  int
+    PacketsRead    uint64
+    BytesRead      uint64
+    KeyFrames      uint64
+    DroppedPackets uint64
+    StartedAt      time.Time
+    LastPacketAt   time.Time
+    LastError      string
+    Streams        []StreamInfo
+    ActualFPS      float64
+    BitrateBps     float64
+}
+
+type StreamInfo struct {
+    Idx        uint16
+    CodecType  CodecType
+    Width      int
+    Height     int
+    SampleRate int
+}
+```
+
+Notes:
+
+- `Streams` is derived from the relay's current codec headers and is refreshed on mid-stream codec changes (`pkt.NewCodecs`).
+- Today the relay replaces its stored headers with `pkt.NewCodecs` verbatim. If a demuxer emits partial codec-change updates, `Streams` may contain only the changed streams rather than the full stream set.
+- `ActualFPS` is computed as `PacketsRead / elapsedSecondsSinceStart`, so for mixed audio/video relays it is an aggregate packet rate, not strictly video frame rate.
+- `BitrateBps` is computed as `(BytesRead * 8) / elapsedSecondsSinceStart`.
+- `DroppedPackets` increments only in the `2+` consumer leaky-delivery mode when a consumer queue is full.
+
+### RelayHub architecture
+
+Each level has a single responsibility:
+
+- `RelayHub`: owns the `sourceID -> relay` map, starts relays on demand, and removes idle relays on a 1 s ticker.
+- `Relay`: owns one upstream `DemuxCloser`, tracks current codec headers and stats, reads packets, and fans them out to active consumers.
+- `Consumer`: owns one downstream `MuxCloser`, buffers packets in a bounded queue, writes headers/trailers, and reports async write failures via `ErrChan`.
+
+Data flow:
+
+```text
+Consume(sourceID, consumerID)
+    |
+    v
+RelayHub
+    |- create relay on first consumer for sourceID
+    |- enqueue relay start
+    `- attach consumer
+          |
+          v
+      Relay
+          |- demuxerFactory(sourceID)
+          |- GetCodecs() -> current headers
+          |- readWriteLoop():
+          |    ReadPacket() -> update stats -> fan out packet
+          `- close when hub stops or after the hub cleanup tick observes zero consumers
+                |
+                v
+            Consumer
+                |- muxerFactory(consumerID)
+                |- async muxer open + WriteHeader(headers)
+                |- WritePacket(pkt)
+                |- optional WriteCodecChange(pkt.NewCodecs)
+                `- WriteTrailer() on shutdown
+```
+
+Goroutine model:
+
+- `RelayHub.Start` launches one background goroutine that handles relay startup, hub shutdown, and idle-relay cleanup.
+- `Relay.Start` launches the demuxer lifecycle goroutine plus a dedicated packet read/fan-out loop.
+- `Consumer.Start` launches one goroutine per consumer that opens the muxer and drains that consumer's packet queue.
+
+Cleanup model:
+
+- Hub-level cleanup removes relays whose `ConsumerCount()` reaches zero.
+- Relay-level cleanup closes inactive consumers and invokes the optional `DemuxerRemover` with a detached 5 s timeout context.
+- Consumer-level cleanup invokes `WriteTrailer`, closes the muxer, and then invokes the optional `MuxerRemover` with a detached 5 s timeout context.
+
 ---
 
 ## Format containers
@@ -246,17 +340,42 @@ Bidirectional streaming transport for AV packets between vrtc nodes over gRPC. T
 
 ```go
 // Server side — register with a gRPC server
-srv := avgrpc.NewServer(demuxerFactory, demuxerRemover)
+srv := avgrpc.NewServer(
+    nil, // optional PushHandler
+    func(ctx context.Context, sourceID, consumerID string, mux av.MuxCloser) error {
+        handle, err := hub.Consume(ctx, sourceID, av.ConsumeOptions{
+            ConsumerID: consumerID,
+            MuxerFactory: func(context.Context, string) (av.MuxCloser, error) {
+                return mux, nil
+            },
+        })
+        if err != nil { return err }
+        defer handle.Close(ctx)
+        <-ctx.Done()
+        return nil
+    },
+    avgrpc.WithPauseHandler(func(ctx context.Context, sourceID string, pause bool) error {
+        if pause {
+            return hub.PauseRelay(ctx, sourceID)
+        }
+        return hub.ResumeRelay(ctx, sourceID)
+    }),
+)
 avtransportv1.RegisterAVTransportServiceServer(grpcServer, srv)
 
-// Client side — push packets to a remote server
-mux, _ := avgrpc.NewClientMuxer(ctx, conn, "rtsp://camera-1/stream")
+// Optional: when using PushStream, expose pushed sources as a DemuxerFactory.
+demuxerFactory := srv.DemuxerFactory()
+
+// Client side — push packets to a remote server.
+// NewClientMuxer returns a muxer directly; it opens PushStream on WriteHeader.
+mux := avgrpc.NewClientMuxer(conn, "rtsp://camera-1/stream")
 mux.WriteHeader(ctx, streams)
 // ... WritePacket loop ...
 mux.WriteTrailer(ctx, nil)
 
-// Client side — pull packets from a remote server
-dmx, _ := avgrpc.NewClientDemuxer(ctx, conn, "rtsp://camera-1/stream")
+// Client side — pull packets from a remote server.
+// consumerID is required by the constructor.
+dmx := avgrpc.NewClientDemuxer(conn, "rtsp://camera-1/stream", "viewer-a")
 streams, _ := dmx.GetCodecs(ctx)
 for {
     pkt, err := dmx.ReadPacket(ctx)
