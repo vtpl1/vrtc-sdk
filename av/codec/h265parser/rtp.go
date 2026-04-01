@@ -47,6 +47,12 @@ func (p *Parser) Flush() *AccessUnit {
 		return nil
 	}
 
+	if !containsVCLNALU(p.current) {
+		p.current = nil
+
+		return nil
+	}
+
 	au := p.buildAU()
 	p.current = nil
 
@@ -123,6 +129,12 @@ func (p *Parser) pushNALU(nalu []byte) (*AccessUnit, bool) {
 	typ := NALUType(nalu)
 
 	if IsFirstSlice(nalu) && len(p.current) > 0 {
+		if !containsVCLNALU(p.current) {
+			p.current = append(p.current, nalu)
+
+			return nil, false
+		}
+
 		au := p.buildAU()
 		p.current = p.current[:0]
 		p.current = append(p.current, nalu)
@@ -150,4 +162,8 @@ func (p *Parser) buildAU() *AccessUnit {
 	}
 
 	return au
+}
+
+func containsVCLNALU(nalus [][]byte) bool {
+	return slices.ContainsFunc(nalus, IsDataNALU)
 }

@@ -2,6 +2,7 @@ package h265parser_test
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"io"
 	"net/http"
@@ -233,6 +234,59 @@ func TestHEVCDecoderConfigurationRecord_Roundtrip(t *testing.T) {
 	}
 
 	record := cd.HEVCDecoderConfigurationRecordBytes()
+	if len(record) < 23 {
+		t.Fatalf("record too short: %d bytes", len(record))
+	}
+
+	if record[0] != 1 {
+		t.Fatalf("configurationVersion = %d, want 1", record[0])
+	}
+
+	if record[13]&0xF0 != 0xF0 {
+		t.Fatalf("reserved min_spatial_segmentation_idc bits not set: 0x%02x", record[13])
+	}
+
+	if record[15]&0xFC != 0xFC {
+		t.Fatalf("reserved parallelismType bits not set: 0x%02x", record[15])
+	}
+
+	if record[16]&0xFC != 0xFC {
+		t.Fatalf("reserved chromaFormat bits not set: 0x%02x", record[16])
+	}
+
+	if record[17]&0xF8 != 0xF8 {
+		t.Fatalf("reserved bitDepthLumaMinus8 bits not set: 0x%02x", record[17])
+	}
+
+	if record[18]&0xF8 != 0xF8 {
+		t.Fatalf("reserved bitDepthChromaMinus8 bits not set: 0x%02x", record[18])
+	}
+
+	if got := record[21] & 0x03; got != 3 {
+		t.Fatalf("lengthSizeMinusOne = %d, want 3", got)
+	}
+
+	if record[22] != 3 {
+		t.Fatalf("numOfArrays = %d, want 3", record[22])
+	}
+
+	offset := 23
+	for _, wantType := range []byte{32, 33, 34} {
+		if len(record) < offset+5 {
+			t.Fatalf("record truncated before array type %d", wantType)
+		}
+
+		if got := record[offset] & 0x3f; got != wantType {
+			t.Fatalf("array type = %d at offset %d, want %d", got, offset, wantType)
+		}
+
+		if got := binary.BigEndian.Uint16(record[offset+1 : offset+3]); got != 1 {
+			t.Fatalf("array type %d numNalus = %d, want 1", wantType, got)
+		}
+
+		naluLen := int(binary.BigEndian.Uint16(record[offset+3 : offset+5]))
+		offset += 5 + naluLen
+	}
 
 	cd2, err := h265parser.NewCodecDataFromAVCDecoderConfRecord(record)
 	if err != nil {
@@ -242,6 +296,30 @@ func TestHEVCDecoderConfigurationRecord_Roundtrip(t *testing.T) {
 	if cd.Width() != cd2.Width() || cd.Height() != cd2.Height() {
 		t.Errorf("roundtrip mismatch: %dx%d vs %dx%d",
 			cd.Width(), cd.Height(), cd2.Width(), cd2.Height())
+	}
+
+	if !bytes.Equal(cd.VPS(), cd2.VPS()) {
+		t.Errorf("VPS mismatch after round-trip")
+	}
+
+	if !bytes.Equal(cd.SPS(), cd2.SPS()) {
+		t.Errorf("SPS mismatch after round-trip")
+	}
+
+	if !bytes.Equal(cd.PPS(), cd2.PPS()) {
+		t.Errorf("PPS mismatch after round-trip")
+	}
+
+	if cd.RecordInfo.GeneralProfileCompatibilityFlags != cd2.RecordInfo.GeneralProfileCompatibilityFlags {
+		t.Errorf("compatibility flags mismatch: %#x vs %#x",
+			cd.RecordInfo.GeneralProfileCompatibilityFlags,
+			cd2.RecordInfo.GeneralProfileCompatibilityFlags)
+	}
+
+	if cd.RecordInfo.GeneralConstraintIndicatorFlags != cd2.RecordInfo.GeneralConstraintIndicatorFlags {
+		t.Errorf("constraint flags mismatch: %#x vs %#x",
+			cd.RecordInfo.GeneralConstraintIndicatorFlags,
+			cd2.RecordInfo.GeneralConstraintIndicatorFlags)
 	}
 }
 

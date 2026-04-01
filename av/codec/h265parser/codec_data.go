@@ -2,6 +2,7 @@ package h265parser
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strconv"
@@ -62,11 +63,18 @@ func NewCodecDataFromVPSAndSPSAndPPS(vps, sps, pps []byte) (CodecData, error) {
 	}
 
 	recordinfo := HEVCDecoderConfigurationRecord{
+		ConfigurationVersion:             1,
+		GeneralProfileSpace:              uint8(s.SPSInfo.generalProfileSpace),
 		GeneralProfileIDC:                uint8(s.SPSInfo.generalProfileIDC),
 		GeneralLevelIDC:                  uint8(s.SPSInfo.generalLevelIDC),
 		GeneralTierFlag:                  uint8(s.SPSInfo.generalTierFlag),
 		GeneralProfileCompatibilityFlags: s.SPSInfo.generalProfileCompatibilityFlags,
 		GeneralConstraintIndicatorFlags:  s.SPSInfo.generalConstraintIndicatorFlags,
+		ChromaFormat:                     uint8(s.SPSInfo.chromaFormat),
+		BitDepthLumaMinus8:               uint8(s.SPSInfo.bitDepthLumaMinus8),
+		BitDepthChromaMinus8:             uint8(s.SPSInfo.bitDepthChromaMinus8),
+		NumTemporalLayers:                uint8(s.SPSInfo.numTemporalLayers),
+		TemporalIDNested:                 uint8(s.SPSInfo.temporalIDNested),
 		SPS:                              [][]byte{sps},
 		PPS:                              [][]byte{pps},
 		VPS:                              [][]byte{vps},
@@ -204,7 +212,16 @@ type HEVCDecoderConfigurationRecord struct {
 	GeneralConstraintIndicatorFlags  uint64
 	GeneralLevelIDC                  uint8
 
-	LengthSizeMinusOne uint8
+	MinSpatialSegmentationIDC uint16
+	ParallelismType           uint8
+	ChromaFormat              uint8
+	BitDepthLumaMinus8        uint8
+	BitDepthChromaMinus8      uint8
+	AvgFrameRate              uint16
+	ConstantFrameRate         uint8
+	NumTemporalLayers         uint8
+	TemporalIDNested          uint8
+	LengthSizeMinusOne        uint8
 
 	VPS [][]byte
 	SPS [][]byte
@@ -213,84 +230,72 @@ type HEVCDecoderConfigurationRecord struct {
 
 // Unmarshal parses the hvcC record from b, returning the number of bytes consumed.
 func (s *HEVCDecoderConfigurationRecord) Unmarshal(b []byte) (int, error) {
-	if len(b) < 30 {
+	if len(b) < 23 {
 		return 0, ErrDecconfInvalid
 	}
 
-	s.GeneralProfileIDC = b[1]
-	s.GeneralProfileCompatibilityFlags = uint32(b[2])
-	s.GeneralLevelIDC = b[3]
-	s.LengthSizeMinusOne = b[4] & 0x03
+	*s = HEVCDecoderConfigurationRecord{}
+	s.ConfigurationVersion = b[0]
+	s.GeneralProfileSpace = b[1] >> 6
+	s.GeneralTierFlag = (b[1] >> 5) & 0x01
+	s.GeneralProfileIDC = b[1] & 0x1f
+	s.GeneralProfileCompatibilityFlags = binary.BigEndian.Uint32(b[2:6])
+	s.GeneralConstraintIndicatorFlags = uint64(b[6])<<40 |
+		uint64(b[7])<<32 |
+		uint64(b[8])<<24 |
+		uint64(b[9])<<16 |
+		uint64(b[10])<<8 |
+		uint64(b[11])
+	s.GeneralLevelIDC = b[12]
+	s.MinSpatialSegmentationIDC = uint16(b[13]&0x0f)<<8 | uint16(b[14])
+	s.ParallelismType = b[15] & 0x03
+	s.ChromaFormat = b[16] & 0x03
+	s.BitDepthLumaMinus8 = b[17] & 0x07
+	s.BitDepthChromaMinus8 = b[18] & 0x07
+	s.AvgFrameRate = pio.U16BE(b[19:])
+	s.ConstantFrameRate = b[21] >> 6
+	s.NumTemporalLayers = (b[21] >> 3) & 0x07
+	s.TemporalIDNested = (b[21] >> 2) & 0x01
+	s.LengthSizeMinusOne = b[21] & 0x03
 
-	n := 26
-	vpscount := int(b[25] & 0x1f)
+	n := 23
+	numArrays := int(b[22])
 
-	for range vpscount {
-		if len(b) < n+2 {
+	for range numArrays {
+		if len(b) < n+3 {
 			return n, ErrDecconfInvalid
 		}
 
-		vpslen := int(pio.U16BE(b[n:]))
+		nalType := b[n] & 0x3f
+		n++
+
+		numNALUs := int(pio.U16BE(b[n:]))
 		n += 2
 
-		if len(b) < n+vpslen {
-			return n, ErrDecconfInvalid
+		for range numNALUs {
+			if len(b) < n+2 {
+				return n, ErrDecconfInvalid
+			}
+
+			naluLen := int(pio.U16BE(b[n:]))
+			n += 2
+
+			if len(b) < n+naluLen {
+				return n, ErrDecconfInvalid
+			}
+
+			nalu := b[n : n+naluLen]
+			n += naluLen
+
+			switch nalType {
+			case 32:
+				s.VPS = append(s.VPS, nalu)
+			case 33:
+				s.SPS = append(s.SPS, nalu)
+			case 34:
+				s.PPS = append(s.PPS, nalu)
+			}
 		}
-
-		s.VPS = append(s.VPS, b[n:n+vpslen])
-		n += vpslen
-	}
-
-	// Each array section: array_completeness|reserved|nal_unit_type (1 byte)
-	// + numNalus (2 bytes BE). We skip the type byte and high byte of count.
-	if len(b) < n+3 {
-		return n, ErrDecconfInvalid
-	}
-
-	n++ // skip nal_unit_type for SPS section
-	n++ // skip high byte of numNalus
-	spscount := int(b[n])
-	n++
-
-	for range spscount {
-		if len(b) < n+2 {
-			return n, ErrDecconfInvalid
-		}
-
-		spslen := int(pio.U16BE(b[n:]))
-		n += 2
-
-		if len(b) < n+spslen {
-			return n, ErrDecconfInvalid
-		}
-
-		s.SPS = append(s.SPS, b[n:n+spslen])
-		n += spslen
-	}
-
-	if len(b) < n+3 {
-		return n, ErrDecconfInvalid
-	}
-
-	n++ // skip nal_unit_type for PPS section
-	n++ // skip high byte of numNalus
-	ppscount := int(b[n])
-	n++
-
-	for range ppscount {
-		if len(b) < n+2 {
-			return n, ErrDecconfInvalid
-		}
-
-		ppslen := int(pio.U16BE(b[n:]))
-		n += 2
-
-		if len(b) < n+ppslen {
-			return n, ErrDecconfInvalid
-		}
-
-		s.PPS = append(s.PPS, b[n:n+ppslen])
-		n += ppslen
 	}
 
 	return n, nil
@@ -299,72 +304,152 @@ func (s *HEVCDecoderConfigurationRecord) Unmarshal(b []byte) (int, error) {
 // Len returns the marshalled size of the record in bytes.
 func (s *HEVCDecoderConfigurationRecord) Len() int {
 	n := 23
-	for _, sps := range s.SPS {
-		n += 5 + len(sps)
-	}
 
-	for _, pps := range s.PPS {
-		n += 5 + len(pps)
-	}
-
-	for _, vps := range s.VPS {
-		n += 5 + len(vps)
-	}
+	n += hevcArrayLen(s.VPS)
+	n += hevcArrayLen(s.SPS)
+	n += hevcArrayLen(s.PPS)
 
 	return n
 }
 
 // Marshal serialises the record into b and returns the number of bytes written.
-func (s *HEVCDecoderConfigurationRecord) Marshal(b []byte, _ SPSInfo) int {
-	n := 0
-	b[0] = 1
-	b[1] = s.GeneralProfileIDC
-	b[2] = byte(s.GeneralProfileCompatibilityFlags)
-	b[3] = s.GeneralLevelIDC
-	b[21] = 3
-	b[22] = 3
-	n += 23
-
-	b[n] = (s.VPS[0][0] >> 1) & 0x3f
-	n++
-	b[n] = byte(len(s.VPS) >> 8)
-	n++
-	b[n] = byte(len(s.VPS))
-	n++
-
-	for _, vps := range s.VPS {
-		pio.PutU16BE(b[n:], uint16(len(vps)))
-		n += 2
-		copy(b[n:], vps)
-		n += len(vps)
+func (s *HEVCDecoderConfigurationRecord) Marshal(b []byte, info SPSInfo) int {
+	cfgVersion := s.ConfigurationVersion
+	if cfgVersion == 0 {
+		cfgVersion = 1
 	}
 
-	b[n] = (s.SPS[0][0] >> 1) & 0x3f
-	n++
-	b[n] = byte(len(s.SPS) >> 8)
-	n++
-	b[n] = byte(len(s.SPS))
-	n++
-
-	for _, sps := range s.SPS {
-		pio.PutU16BE(b[n:], uint16(len(sps)))
-		n += 2
-		copy(b[n:], sps)
-		n += len(sps)
+	profileSpace := s.GeneralProfileSpace & 0x03
+	if profileSpace == 0 && info.generalProfileSpace != 0 {
+		profileSpace = uint8(info.generalProfileSpace)
 	}
 
-	b[n] = (s.PPS[0][0] >> 1) & 0x3f
-	n++
-	b[n] = byte(len(s.PPS) >> 8)
-	n++
-	b[n] = byte(len(s.PPS))
-	n++
+	tierFlag := s.GeneralTierFlag & 0x01
+	if tierFlag == 0 && info.generalTierFlag != 0 {
+		tierFlag = uint8(info.generalTierFlag)
+	}
 
-	for _, pps := range s.PPS {
-		pio.PutU16BE(b[n:], uint16(len(pps)))
+	profileIDC := s.GeneralProfileIDC & 0x1f
+	if profileIDC == 0 && info.generalProfileIDC != 0 {
+		profileIDC = uint8(info.generalProfileIDC)
+	}
+
+	compatFlags := s.GeneralProfileCompatibilityFlags
+	if compatFlags == 0 && info.generalProfileCompatibilityFlags != 0 {
+		compatFlags = info.generalProfileCompatibilityFlags
+	}
+
+	constraintFlags := s.GeneralConstraintIndicatorFlags & 0x0000FFFFFFFFFFFF
+	if constraintFlags == 0 && info.generalConstraintIndicatorFlags != 0 {
+		constraintFlags = info.generalConstraintIndicatorFlags & 0x0000FFFFFFFFFFFF
+	}
+
+	levelIDC := s.GeneralLevelIDC
+	if levelIDC == 0 && info.generalLevelIDC != 0 {
+		levelIDC = uint8(info.generalLevelIDC)
+	}
+
+	chromaFormat := s.ChromaFormat & 0x03
+	if chromaFormat == 0 && info.chromaFormat != 0 {
+		chromaFormat = uint8(info.chromaFormat)
+	}
+
+	bitDepthLumaMinus8 := s.BitDepthLumaMinus8 & 0x07
+	if bitDepthLumaMinus8 == 0 && info.bitDepthLumaMinus8 != 0 {
+		bitDepthLumaMinus8 = uint8(info.bitDepthLumaMinus8)
+	}
+
+	bitDepthChromaMinus8 := s.BitDepthChromaMinus8 & 0x07
+	if bitDepthChromaMinus8 == 0 && info.bitDepthChromaMinus8 != 0 {
+		bitDepthChromaMinus8 = uint8(info.bitDepthChromaMinus8)
+	}
+
+	numTemporalLayers := s.NumTemporalLayers & 0x07
+	if numTemporalLayers == 0 && info.numTemporalLayers != 0 {
+		numTemporalLayers = uint8(info.numTemporalLayers)
+	}
+
+	temporalIDNested := s.TemporalIDNested & 0x01
+	if temporalIDNested == 0 && info.temporalIDNested != 0 {
+		temporalIDNested = uint8(info.temporalIDNested)
+	}
+
+	lengthSizeMinusOne := s.LengthSizeMinusOne & 0x03
+	if lengthSizeMinusOne == 0 {
+		lengthSizeMinusOne = 3
+	}
+
+	b[0] = cfgVersion
+	b[1] = (profileSpace << 6) | (tierFlag << 5) | profileIDC
+	binary.BigEndian.PutUint32(b[2:6], compatFlags)
+	b[6] = byte(constraintFlags >> 40)
+	b[7] = byte(constraintFlags >> 32)
+	b[8] = byte(constraintFlags >> 24)
+	b[9] = byte(constraintFlags >> 16)
+	b[10] = byte(constraintFlags >> 8)
+	b[11] = byte(constraintFlags)
+	b[12] = levelIDC
+	b[13] = 0xF0 | byte((s.MinSpatialSegmentationIDC>>8)&0x0f)
+	b[14] = byte(s.MinSpatialSegmentationIDC)
+	b[15] = 0xFC | (s.ParallelismType & 0x03)
+	b[16] = 0xFC | chromaFormat
+	b[17] = 0xF8 | bitDepthLumaMinus8
+	b[18] = 0xF8 | bitDepthChromaMinus8
+	pio.PutU16BE(b[19:], s.AvgFrameRate)
+	b[21] = (s.ConstantFrameRate&0x03)<<6 |
+		(numTemporalLayers&0x07)<<3 |
+		(temporalIDNested&0x01)<<2 |
+		lengthSizeMinusOne
+
+	numArrays := 0
+	if len(s.VPS) > 0 {
+		numArrays++
+	}
+	if len(s.SPS) > 0 {
+		numArrays++
+	}
+	if len(s.PPS) > 0 {
+		numArrays++
+	}
+
+	b[22] = byte(numArrays)
+	n := 23
+
+	n = marshalHEVCArray(b, n, 32, s.VPS)
+	n = marshalHEVCArray(b, n, 33, s.SPS)
+	n = marshalHEVCArray(b, n, 34, s.PPS)
+
+	return n
+}
+
+func hevcArrayLen(nalus [][]byte) int {
+	if len(nalus) == 0 {
+		return 0
+	}
+
+	n := 3
+	for _, nalu := range nalus {
+		n += 2 + len(nalu)
+	}
+
+	return n
+}
+
+func marshalHEVCArray(b []byte, n int, nalType uint8, nalus [][]byte) int {
+	if len(nalus) == 0 {
+		return n
+	}
+
+	b[n] = 0x80 | (nalType & 0x3f)
+	n++
+	pio.PutU16BE(b[n:], uint16(len(nalus)))
+	n += 2
+
+	for _, nalu := range nalus {
+		pio.PutU16BE(b[n:], uint16(len(nalu)))
 		n += 2
-		copy(b[n:], pps)
-		n += len(pps)
+		copy(b[n:], nalu)
+		n += len(nalu)
 	}
 
 	return n
