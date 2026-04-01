@@ -2,6 +2,7 @@ package segment_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/vtpl1/vrtc-sdk/av"
 	"github.com/vtpl1/vrtc-sdk/av/codec/h264parser"
+	"github.com/vtpl1/vrtc-sdk/av/relayhub"
 	"github.com/vtpl1/vrtc-sdk/av/segment"
 )
 
@@ -62,7 +64,7 @@ func TestNewSegmentMuxer_CreatesFile(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "seg.mp4")
 
-	mux, err := segment.NewSegmentMuxer(path, time.Now(), segment.ProfileSSD, 0, nil, nil)
+	mux, err := segment.NewSegmentMuxer(path, time.Now(), segment.ProfileSSD, 0, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("NewSegmentMuxer: %v", err)
 	}
@@ -81,7 +83,7 @@ func TestNewSegmentMuxer_InvalidPath(t *testing.T) {
 
 	_, err := segment.NewSegmentMuxer(
 		filepath.Join(t.TempDir(), "no", "such", "dir", "seg.mp4"),
-		time.Now(), segment.ProfileSSD, 0, nil, nil,
+		time.Now(), segment.ProfileSSD, 0, 0, nil, nil,
 	)
 	if err == nil {
 		t.Fatal("expected error for invalid path")
@@ -104,7 +106,7 @@ func TestSegmentMuxer_FullLifecycle(t *testing.T) {
 		mu.Unlock()
 	}
 
-	mux, err := segment.NewSegmentMuxer(path, startTime, segment.ProfileSSD, 0, nil, onClose)
+	mux, err := segment.NewSegmentMuxer(path, startTime, segment.ProfileSSD, 0, 0, nil, onClose)
 	if err != nil {
 		t.Fatalf("NewSegmentMuxer: %v", err)
 	}
@@ -170,7 +172,7 @@ func TestSegmentMuxer_AnalyticsFlags_NoAnalytics(t *testing.T) {
 		gotInfo = info
 	}
 
-	mux, err := segment.NewSegmentMuxer(path, time.Now(), segment.ProfileSSD, 0, nil, onClose)
+	mux, err := segment.NewSegmentMuxer(path, time.Now(), segment.ProfileSSD, 0, 0, nil, onClose)
 	if err != nil {
 		t.Fatalf("NewSegmentMuxer: %v", err)
 	}
@@ -210,7 +212,7 @@ func TestSegmentMuxer_AnalyticsFlags_MotionOnly(t *testing.T) {
 		gotInfo = info
 	}
 
-	mux, err := segment.NewSegmentMuxer(path, time.Now(), segment.ProfileSSD, 0, nil, onClose)
+	mux, err := segment.NewSegmentMuxer(path, time.Now(), segment.ProfileSSD, 0, 0, nil, onClose)
 	if err != nil {
 		t.Fatalf("NewSegmentMuxer: %v", err)
 	}
@@ -253,7 +255,7 @@ func TestSegmentMuxer_AnalyticsFlags_WithObjects(t *testing.T) {
 		gotInfo = info
 	}
 
-	mux, err := segment.NewSegmentMuxer(path, time.Now(), segment.ProfileSSD, 0, nil, onClose)
+	mux, err := segment.NewSegmentMuxer(path, time.Now(), segment.ProfileSSD, 0, 0, nil, onClose)
 	if err != nil {
 		t.Fatalf("NewSegmentMuxer: %v", err)
 	}
@@ -291,7 +293,7 @@ func TestSegmentMuxer_CloseWithoutOnClose(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "nocallback.mp4")
 
-	mux, err := segment.NewSegmentMuxer(path, time.Now(), segment.ProfileSSD, 0, nil, nil)
+	mux, err := segment.NewSegmentMuxer(path, time.Now(), segment.ProfileSSD, 0, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("NewSegmentMuxer: %v", err)
 	}
@@ -324,7 +326,7 @@ func TestSegmentMuxer_WithRingBuffer(t *testing.T) {
 		gotInfo = info
 	}
 
-	mux, err := segment.NewSegmentMuxer(path, time.Now(), segment.ProfileSSD, 0, ring, onClose)
+	mux, err := segment.NewSegmentMuxer(path, time.Now(), segment.ProfileSSD, 0, 0, ring, onClose)
 	if err != nil {
 		t.Fatalf("NewSegmentMuxer: %v", err)
 	}
@@ -379,7 +381,7 @@ func TestSegmentMuxer_ValidationError_EmptyFile(t *testing.T) {
 	// Create the muxer but close without writing anything meaningful.
 	// The fmp4.Muxer will not write header/trailer, resulting in an
 	// invalid or empty file.
-	mux, err := segment.NewSegmentMuxer(path, time.Now(), segment.ProfileSSD, 0, nil, onClose)
+	mux, err := segment.NewSegmentMuxer(path, time.Now(), segment.ProfileSSD, 0, 0, nil, onClose)
 	if err != nil {
 		t.Fatalf("NewSegmentMuxer: %v", err)
 	}
@@ -392,5 +394,82 @@ func TestSegmentMuxer_ValidationError_EmptyFile(t *testing.T) {
 
 	if gotInfo.ValidationError == nil {
 		t.Error("expected ValidationError for empty/invalid segment")
+	}
+}
+
+func TestSegmentMuxer_SizeRotation(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rotate.mp4")
+
+	var gotInfo segment.SegmentCloseInfo
+	onClose := func(info segment.SegmentCloseInfo) {
+		gotInfo = info
+	}
+
+	// Set maxSegmentBytes to 1 byte — any keyframe after the first should rotate.
+	maxBytes := int64(1)
+	mux, err := segment.NewSegmentMuxer(path, time.Now(), segment.ProfileSSD, maxBytes, 0, nil, onClose)
+	if err != nil {
+		t.Fatalf("NewSegmentMuxer: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := mux.WriteHeader(ctx, makeStreams(t)); err != nil {
+		t.Fatalf("WriteHeader: %v", err)
+	}
+
+	// First keyframe writes ftyp+moov+first moof+mdat → BytesWritten > 1.
+	if err := mux.WritePacket(ctx, makeKeyframe(0)); err != nil {
+		t.Fatalf("WritePacket(kf0): %v", err)
+	}
+
+	t.Logf("BytesWritten after kf0: %d", mux.BytesWritten())
+
+	// Second keyframe should trigger ErrMuxerRotate since we're over 1 byte.
+	err = mux.WritePacket(ctx, makeKeyframe(33*time.Millisecond))
+	if err == nil {
+		t.Fatal("expected ErrMuxerRotate, got nil")
+	}
+	if !errors.Is(err, relayhub.ErrMuxerRotate) {
+		t.Fatalf("expected ErrMuxerRotate, got %v", err)
+	}
+
+	// Close the muxer — should finalize normally.
+	if err := mux.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if gotInfo.SizeBytes <= 0 {
+		t.Errorf("expected SizeBytes > 0, got %d", gotInfo.SizeBytes)
+	}
+}
+
+func TestSegmentMuxer_NoRotationWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "norotate.mp4")
+
+	// maxSegmentBytes=0 means no rotation.
+	mux, err := segment.NewSegmentMuxer(path, time.Now(), segment.ProfileSSD, 0, 0, nil, nil)
+	if err != nil {
+		t.Fatalf("NewSegmentMuxer: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := mux.WriteHeader(ctx, makeStreams(t)); err != nil {
+		t.Fatalf("WriteHeader: %v", err)
+	}
+
+	// Write many keyframes — none should trigger rotation.
+	for i := range 10 {
+		if err := mux.WritePacket(ctx, makeKeyframe(time.Duration(i)*33*time.Millisecond)); err != nil {
+			t.Fatalf("WritePacket(%d): %v", i, err)
+		}
+	}
+
+	if err := mux.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 }

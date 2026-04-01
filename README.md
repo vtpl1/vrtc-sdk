@@ -14,8 +14,9 @@ A Go library for building audio/video pipelines. It provides the core data model
 |---------|---------|
 | `av` | Core types: `Packet`, `Stream`, `CodecData`, `Demuxer`, `Muxer`, codec constants |
 | `av/chain` | Multi-segment chaining demuxer with `SegmentSource` abstraction for sequential playback |
-| `av/segment` | Segment recording helpers: storage-aware file writer, optional fragment ring buffer, segment validation |
-| `av/relayhub` | Fan-out coordinator: one demuxer → N muxer consumers |
+| `av/segment` | Segment recording helpers: storage-aware file writer, size-based rotation, optional fragment ring buffer, segment validation |
+| `av/packetbuf` | Packet-level ring buffer with `DemuxCloser` replay for near-live playback |
+| `av/relayhub` | Fan-out coordinator: one demuxer → N muxer consumers, with muxer rotation support |
 | `av/codec/h264parser` | H.264 SPS/PPS extraction, AVCC↔Annex B conversion |
 | `av/codec/h265parser` | H.265 VPS/SPS/PPS extraction, RTP reassembly, AVCC↔Annex B |
 | `av/codec/aacparser` | MPEG-4 audio config, ADTS framing |
@@ -237,6 +238,20 @@ Cleanup model:
 - Relay-level cleanup closes inactive consumers and invokes the optional `DemuxerRemover` with a detached 5 s timeout context.
 - Consumer-level cleanup invokes `WriteTrailer`, closes the muxer, and then invokes the optional `MuxerRemover` with a detached 5 s timeout context.
 
+### Muxer rotation
+
+A consumer's `MuxCloser` may return `relayhub.ErrMuxerRotate` from `WritePacket` to
+signal that the current segment is full. The consumer handles this automatically:
+
+1. Calls `WriteTrailer` + `Close` on the current muxer
+2. Calls `MuxerFactory` again to open a new muxer
+3. Sends `WriteHeader` with the current codec headers
+4. Re-delivers the keyframe packet that triggered rotation
+
+This enables size-based segment rotation without any coordination between the
+relay and the recording layer. The `segment.SegmentMuxer` uses this mechanism
+internally when `maxSegmentBytes > 0`.
+
 ---
 
 ## Format containers
@@ -258,7 +273,8 @@ The demuxer reads standard fMP4 files and CMAF streams produced by this muxer.
 
 ### Segment recording (`av/segment`)
 
-Builds on top of `av/format/fmp4` for file-per-segment recording with optional in-memory replay.
+Builds on top of `av/format/fmp4` for file-per-segment recording with size-based
+rotation, preallocation, and optional in-memory replay.
 
 ```go
 ring := segment.NewRingBuffer(10 * time.Second) // optional, can be nil
@@ -267,7 +283,8 @@ mux, err := segment.NewSegmentMuxer(
     "segments/2026-03-31T12-00-00Z.mp4",
     time.Now().UTC(),
     segment.ProfileAuto, // auto-detect: SSD/HDD/NAS/SAN
-    64<<20,              // optional preallocation hint (bytes)
+    64<<20,              // max segment size (bytes); 0 = no limit
+    72<<20,              // preallocation size (target + headroom); 0 = none
     ring,
     func(info segment.SegmentCloseInfo) {
         // info includes Path, Start/End, SizeBytes, analytics flags, validation result
@@ -284,6 +301,20 @@ for _, pkt := range packets {
 }
 if err := mux.Close(); err != nil { /* handle */ }
 ```
+
+**Size-based rotation:** When `maxSegmentBytes > 0`, the muxer returns
+`relayhub.ErrMuxerRotate` from `WritePacket` at the first keyframe after the
+threshold is crossed. When used with a relay hub consumer, rotation is handled
+automatically — the consumer closes the current muxer and opens a new one via
+the `MuxerFactory`. The triggering keyframe is re-delivered to the new muxer.
+
+**Fixed-size files:** When both `maxSegmentBytes` and `preallocBytes` are set,
+the muxer preallocates the file via `fallocate(2)` and writes an ISO BMFF
+`free` box to pad unused space on close. This keeps all segment files at the
+exact preallocated size on disk, eliminating filesystem fragmentation from
+variable-size files.
+
+**Recommended sizes:** 64 MB for 1–4 Mbps streams, 128 MB for 4–8+ Mbps.
 
 `SegmentMuxer` tracks analytics-derived flags per segment:
 
@@ -326,6 +357,45 @@ Implement `chain.SegmentSource` for custom sources (e.g. polling a recording ind
 type SegmentSource interface {
     Next(ctx context.Context) (av.DemuxCloser, error) // io.EOF when done; may block
 }
+```
+
+### Packet buffer (`av/packetbuf`)
+
+A time-limited ring buffer of `av.Packet` values for near-live replay. The write
+side pushes packets (typically from a recording muxer via a tee), and the read
+side creates `DemuxCloser` instances that replay buffered packets then follow
+new ones in real time.
+
+```go
+buf := packetbuf.New(30 * time.Second)
+
+// Write side — push packets as they arrive (thread-safe).
+buf.WriteHeader(streams)
+buf.WritePacket(pkt) // sets WallClockTime if zero
+
+// Read side — replay from a given wall-clock time with live follow.
+dmx := buf.Demuxer(time.Now().Add(-5 * time.Second))
+streams, _ := dmx.GetCodecs(ctx)
+for {
+    pkt, err := dmx.ReadPacket(ctx) // blocks waiting for new packets
+    if err == io.EOF { break }      // buffer closed
+}
+dmx.Close()
+
+buf.Close() // wakes all waiting Demuxers with io.EOF
+```
+
+**Seamless recorded-to-live playback:** Use `packetbuf.Buffer` together with
+`chain.ChainingDemuxer` to bridge the gap between completed disk segments and
+the live stream. The recording consumer tees packets to both disk and the buffer.
+The playback path chains disk segments, then transitions to `buf.Demuxer(lastSegmentEnd)`
+for the live tail:
+
+```text
+ChainingDemuxer
+  ├─ Segment 1 (disk, complete)
+  ├─ Segment 2 (disk, complete)
+  └─ PacketBuffer.Demuxer(lastSegEnd) ← seamless near-live tail
 ```
 
 ### gRPC transport (`av/format/grpc`)

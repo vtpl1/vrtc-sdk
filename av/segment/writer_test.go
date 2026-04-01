@@ -13,7 +13,7 @@ func TestAdaptiveWriter_WriteAndBytesWritten(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "test.mp4")
 
-	w, err := segment.NewAdaptiveWriter(path, segment.ProfileSSD, 0)
+	w, err := segment.NewAdaptiveWriter(path, segment.ProfileSSD, 0, false)
 	if err != nil {
 		t.Fatalf("NewAdaptiveWriter: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestAdaptiveWriter_CloseFlushesToDisk(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "flush.mp4")
 
-	w, err := segment.NewAdaptiveWriter(path, segment.ProfileSSD, 0)
+	w, err := segment.NewAdaptiveWriter(path, segment.ProfileSSD, 0, false)
 	if err != nil {
 		t.Fatalf("NewAdaptiveWriter: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestAdaptiveWriter_Profiles(t *testing.T) {
 
 			path := filepath.Join(t.TempDir(), "test.mp4")
 
-			w, err := segment.NewAdaptiveWriter(path, p, 0)
+			w, err := segment.NewAdaptiveWriter(path, p, 0, false)
 			if err != nil {
 				t.Fatalf("NewAdaptiveWriter(%s): %v", p, err)
 			}
@@ -130,7 +130,7 @@ func TestAdaptiveWriter_InvalidPath(t *testing.T) {
 
 	_, err := segment.NewAdaptiveWriter(
 		filepath.Join(t.TempDir(), "nonexistent", "dir", "test.mp4"),
-		segment.ProfileSSD, 0,
+		segment.ProfileSSD, 0, false,
 	)
 	if err == nil {
 		t.Fatal("expected error for invalid path")

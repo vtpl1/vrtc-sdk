@@ -150,9 +150,41 @@ func (m *Consumer) Start(ctx context.Context) error {
 					}
 
 					if err := muxer.WritePacket(sctx, pkt); err != nil {
-						m.setLastError(errors.Join(ErrMuxerWritePacket, err))
+						if !errors.Is(err, ErrMuxerRotate) {
+							m.setLastError(errors.Join(ErrMuxerWritePacket, err))
 
-						return
+							return
+						}
+
+						// Rotation: finalize old muxer, open a new one.
+						_ = muxer.WriteTrailer(sctx, nil)
+						_ = muxer.Close()
+
+						newMuxer, fErr := m.muxerFactory(sctx, m.id)
+						if fErr != nil || newMuxer == nil {
+							m.setLastError(errors.Join(ErrConsumerMuxFactory, fErr))
+
+							return
+						}
+
+						muxer = newMuxer
+
+						m.dataMu.RLock()
+						streams = m.headers
+						m.dataMu.RUnlock()
+
+						if err := muxer.WriteHeader(sctx, streams); err != nil {
+							m.setLastError(errors.Join(ErrMuxerWriteHeader, err))
+
+							return
+						}
+
+						// Re-deliver the keyframe packet that triggered rotation.
+						if err := muxer.WritePacket(sctx, pkt); err != nil {
+							m.setLastError(errors.Join(ErrMuxerWritePacket, err))
+
+							return
+						}
 					}
 				}
 			}

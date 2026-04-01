@@ -63,4 +63,10 @@ var (
 
 	// ErrConsumerAlreadyStarted is returned when Start is called more than once on a Consumer.
 	ErrConsumerAlreadyStarted = errors.New("consumer already started")
+
+	// ErrMuxerRotate is a sentinel error that a MuxCloser may return from
+	// WritePacket to signal that the current segment is full and the consumer
+	// should close this muxer and open a new one via the MuxerFactory.
+	// The packet that triggered the rotation is re-delivered to the new muxer.
+	ErrMuxerRotate = errors.New("muxer rotate")
 )
