@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/rtp"
@@ -33,12 +34,16 @@ import (
 )
 
 const (
-	defaultRTSPPort = "554"
-	defaultTimeout  = 10 * time.Second
+	defaultRTSPPort        = "554"
+	defaultTimeout         = 10 * time.Second
+	defaultKeepAlivePeriod = 25 * time.Second
 )
 
-// Compile-time interface check.
-var _ av.DemuxCloser = (*Demuxer)(nil)
+// Compile-time interface checks.
+var (
+	_ av.DemuxCloser = (*Demuxer)(nil)
+	_ av.Pauser      = (*Demuxer)(nil)
+)
 
 // Demuxer reads packets from an RTSP source URL.
 type Demuxer struct {
@@ -60,13 +65,22 @@ type Demuxer struct {
 	trackByRTPCh map[uint8]*rtspTrack
 	streams      []av.Stream
 	pending      []av.Packet
+	keepAliveAt  time.Time
+	keepAliveFor time.Duration
+
+	pendingDiscontinuity bool
+
+	pauseMu sync.Mutex
+	pauseCh chan struct{}
+	paused  atomic.Bool
 }
 
 // NewDemuxer creates a RTSP demuxer for sourceID (RTSP URL).
 func NewDemuxer(sourceID string) *Demuxer {
 	return &Demuxer{
-		sourceURL: sourceID,
-		timeNow:   time.Now,
+		sourceURL:    sourceID,
+		timeNow:      time.Now,
+		keepAliveFor: defaultKeepAlivePeriod,
 	}
 }
 
@@ -137,7 +151,7 @@ func (d *Demuxer) GetCodecs(ctx context.Context) ([]av.Stream, error) {
 	if len(tracks) == 0 {
 		_ = d.closeLocked()
 
-		return nil, ErrNoSupportedVideoTrack
+		return nil, ErrNoSupportedTrack
 	}
 
 	for idx, tr := range tracks {
@@ -150,26 +164,31 @@ func (d *Demuxer) GetCodecs(ctx context.Context) ([]av.Stream, error) {
 		}
 	}
 
+	d.trackByRTPCh = make(map[uint8]*rtspTrack, len(tracks))
+	for _, tr := range tracks {
+		d.trackByRTPCh[tr.rtpChannel] = tr
+	}
+
 	if err := d.play(ctx, sourceURL); err != nil {
 		_ = d.closeLocked()
 
 		return nil, err
 	}
 
-	d.trackByRTPCh = make(map[uint8]*rtspTrack, len(tracks))
-	for _, tr := range tracks {
-		d.trackByRTPCh[tr.rtpChannel] = tr
-	}
-
 	d.tracks = tracks
 	d.streams = streams
 	d.started = true
+	d.keepAliveAt = d.timeNow().Add(d.keepAliveFor)
 
 	return append([]av.Stream(nil), d.streams...), nil
 }
 
 // ReadPacket reads one packet from the RTSP session.
 func (d *Demuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
+	if err := d.waitIfPaused(ctx); err != nil {
+		return av.Packet{}, err
+	}
+
 	d.mu.Lock()
 	if !d.started {
 		d.mu.Unlock()
@@ -177,17 +196,21 @@ func (d *Demuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 		return av.Packet{}, ErrNotStarted
 	}
 
+	if err := d.maybeKeepAliveLocked(ctx); err != nil {
+		if rerr := d.reconnectLocked(ctx); rerr != nil {
+			d.mu.Unlock()
+
+			return av.Packet{}, rerr
+		}
+	}
+
 	if len(d.pending) > 0 {
-		pkt := d.pending[0]
-		d.pending = d.pending[1:]
+		pkt := d.popPendingLocked()
 		d.mu.Unlock()
 
 		return pkt, nil
 	}
 
-	conn := d.conn
-	reader := d.reader
-	trackByRTPCh := d.trackByRTPCh
 	timeNow := d.timeNow
 	d.mu.Unlock()
 
@@ -195,6 +218,30 @@ func (d *Demuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 		if err := ctx.Err(); err != nil {
 			return av.Packet{}, err
 		}
+
+		if err := d.waitIfPaused(ctx); err != nil {
+			return av.Packet{}, err
+		}
+
+		d.mu.Lock()
+		if err := d.maybeKeepAliveLocked(ctx); err != nil {
+			if rerr := d.reconnectLocked(ctx); rerr != nil {
+				d.mu.Unlock()
+
+				return av.Packet{}, rerr
+			}
+		}
+
+		if len(d.pending) > 0 {
+			pkt := d.popPendingLocked()
+			d.mu.Unlock()
+
+			return pkt, nil
+		}
+
+		conn := d.conn
+		reader := d.reader
+		d.mu.Unlock()
 
 		_ = conn.SetReadDeadline(timeNow().Add(1 * time.Second))
 
@@ -204,45 +251,31 @@ func (d *Demuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 				continue
 			}
 
-			return av.Packet{}, err
-		}
-
-		// odd channels are RTCP.
-		if (ch % 2) == 1 {
-			continue
-		}
-
-		tr, ok := trackByRTPCh[ch]
-		if !ok {
-			continue
-		}
-
-		var rtpPacket rtp.Packet
-		if err := rtpPacket.Unmarshal(payload); err != nil {
-			continue
-		}
-
-		pkts, err := tr.decodeRTP(&rtpPacket)
-		if err != nil {
-			if err == errNeedMorePackets {
+			d.mu.Lock()
+			rerr := d.reconnectLocked(ctx)
+			d.mu.Unlock()
+			if rerr == nil {
 				continue
 			}
 
-			// Treat packet-level decode errors as non-fatal stream glitches.
-			continue
-		}
-
-		if len(pkts) == 0 {
-			continue
+			return av.Packet{}, err
 		}
 
 		d.mu.Lock()
-		if len(pkts) > 1 {
-			d.pending = append(d.pending, pkts[1:]...)
-		}
-		d.mu.Unlock()
+		if err := d.handleInterleavedPayloadLocked(ch, payload); err != nil {
+			d.mu.Unlock()
 
-		return pkts[0], nil
+			continue
+		}
+
+		if len(d.pending) > 0 {
+			pkt := d.popPendingLocked()
+			d.mu.Unlock()
+
+			return pkt, nil
+		}
+
+		d.mu.Unlock()
 	}
 }
 
@@ -260,6 +293,8 @@ func (d *Demuxer) closeLocked() error {
 	}
 	d.closed = true
 
+	d.resumeReadersLocked()
+
 	var retErr error
 
 	if d.conn != nil {
@@ -274,6 +309,59 @@ func (d *Demuxer) closeLocked() error {
 	}
 
 	return retErr
+}
+
+// Pause implements av.Pauser. It sends a RTSP PAUSE when the session is
+// running and blocks subsequent ReadPacket calls until Resume is called.
+func (d *Demuxer) Pause(ctx context.Context) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.paused.Load() {
+		return nil
+	}
+
+	if d.started && d.baseURL != nil {
+		if err := d.pause(ctx, d.baseURL); err != nil {
+			return err
+		}
+	}
+
+	d.paused.Store(true)
+	d.pauseMu.Lock()
+	d.pauseCh = make(chan struct{})
+	d.pauseMu.Unlock()
+
+	return nil
+}
+
+// Resume implements av.Pauser. It sends a RTSP PLAY when the session is
+// started and resumes packet delivery.
+func (d *Demuxer) Resume(ctx context.Context) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if !d.paused.Load() {
+		return nil
+	}
+
+	if d.started && d.baseURL != nil {
+		if err := d.play(ctx, d.baseURL); err != nil {
+			return err
+		}
+		d.pendingDiscontinuity = true
+		d.keepAliveAt = d.timeNow().Add(d.keepAliveFor)
+	}
+
+	d.paused.Store(false)
+	d.resumeReadersLocked()
+
+	return nil
+}
+
+// IsPaused implements av.Pauser.
+func (d *Demuxer) IsPaused() bool {
+	return d.paused.Load()
 }
 
 func (d *Demuxer) dial(ctx context.Context, u *url.URL) (net.Conn, error) {
@@ -378,6 +466,24 @@ func (d *Demuxer) play(ctx context.Context, u *url.URL) error {
 	return nil
 }
 
+func (d *Demuxer) pause(ctx context.Context, u *url.URL) error {
+	headers := map[string]string{}
+	if d.sessionID != "" {
+		headers["Session"] = d.sessionID
+	}
+
+	resp, err := d.doRequest(ctx, "PAUSE", u.String(), headers, nil)
+	if err != nil {
+		return err
+	}
+
+	if resp.statusCode != 200 {
+		return fmt.Errorf("rtsp: PAUSE failed: %d %s", resp.statusCode, resp.status)
+	}
+
+	return nil
+}
+
 func (d *Demuxer) doRequest(
 	ctx context.Context,
 	method string,
@@ -417,7 +523,7 @@ func (d *Demuxer) doRequest(
 			return nil, fmt.Errorf("rtsp: write %s: %w", method, err)
 		}
 
-		resp, err := readRTSPResponse(d.reader)
+		resp, err := d.readRTSPResponseLocked(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("rtsp: read %s response: %w", method, err)
 		}
@@ -430,6 +536,157 @@ func (d *Demuxer) doRequest(
 	}
 
 	return nil, fmt.Errorf("rtsp: authentication failed")
+}
+
+func (d *Demuxer) readRTSPResponseLocked(ctx context.Context) (*rtspResponse, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		_ = d.conn.SetReadDeadline(d.timeNow().Add(defaultTimeout))
+
+		b, err := d.reader.Peek(1)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(b) == 1 && b[0] == '$' {
+			ch, payload, err := readInterleavedFrame(d.reader)
+			if err != nil {
+				return nil, err
+			}
+
+			if err := d.handleInterleavedPayloadLocked(ch, payload); err != nil {
+				continue
+			}
+
+			continue
+		}
+
+		return readRTSPResponse(d.reader)
+	}
+}
+
+func (d *Demuxer) maybeKeepAliveLocked(ctx context.Context) error {
+	if !d.started || d.baseURL == nil || d.keepAliveFor <= 0 {
+		return nil
+	}
+
+	if !d.keepAliveAt.IsZero() && d.timeNow().Before(d.keepAliveAt) {
+		return nil
+	}
+
+	if err := d.keepAliveLocked(ctx); err != nil {
+		return err
+	}
+
+	d.keepAliveAt = d.timeNow().Add(d.keepAliveFor)
+
+	return nil
+}
+
+func (d *Demuxer) keepAliveLocked(ctx context.Context) error {
+	headers := map[string]string{}
+	if d.sessionID != "" {
+		headers["Session"] = d.sessionID
+	}
+
+	resp, err := d.doRequest(ctx, "SET_PARAMETER", d.baseURL.String(), headers, nil)
+	if err != nil {
+		return err
+	}
+
+	if resp.statusCode == 200 {
+		return nil
+	}
+
+	if resp.statusCode != 405 && resp.statusCode != 451 && resp.statusCode != 501 {
+		return fmt.Errorf("rtsp: SET_PARAMETER keepalive failed: %d %s", resp.statusCode, resp.status)
+	}
+
+	resp, err = d.doRequest(ctx, "OPTIONS", d.baseURL.String(), headers, nil)
+	if err != nil {
+		return err
+	}
+
+	if resp.statusCode != 200 {
+		return fmt.Errorf("rtsp: OPTIONS keepalive failed: %d %s", resp.statusCode, resp.status)
+	}
+
+	return nil
+}
+
+func (d *Demuxer) reconnectLocked(ctx context.Context) error {
+	sourceURL, err := url.Parse(d.sourceURL)
+	if err != nil {
+		return fmt.Errorf("rtsp: parse source url: %w", err)
+	}
+
+	oldTracks := d.tracks
+
+	if d.conn != nil {
+		_ = d.conn.Close()
+	}
+
+	conn, err := d.dial(ctx, sourceURL)
+	if err != nil {
+		return err
+	}
+
+	d.conn = conn
+	d.reader = bufio.NewReader(conn)
+	d.requestID = 1
+	d.sessionID = ""
+	d.baseURL = sourceURL
+	d.auth = authState{username: sourceURL.User.Username()}
+	if pw, ok := sourceURL.User.Password(); ok {
+		d.auth.password = pw
+	}
+
+	if err := d.options(ctx, sourceURL); err != nil {
+		return err
+	}
+
+	sdpBody, err := d.describe(ctx, sourceURL)
+	if err != nil {
+		return err
+	}
+
+	tracks, streams, err := d.buildTracks(sdpBody)
+	if err != nil {
+		return err
+	}
+
+	if len(tracks) == 0 {
+		return ErrNoSupportedTrack
+	}
+
+	carryTrackState(oldTracks, tracks)
+
+	for idx, tr := range tracks {
+		tr.rtpChannel = uint8(idx * 2)
+		if err := d.setupTrack(ctx, sourceURL, tr); err != nil {
+			return err
+		}
+	}
+
+	d.trackByRTPCh = make(map[uint8]*rtspTrack, len(tracks))
+	for _, tr := range tracks {
+		d.trackByRTPCh[tr.rtpChannel] = tr
+	}
+
+	if err := d.play(ctx, sourceURL); err != nil {
+		return err
+	}
+
+	d.tracks = tracks
+	d.streams = streams
+	d.pending = nil
+	d.pendingDiscontinuity = true
+	d.keepAliveAt = d.timeNow().Add(d.keepAliveFor)
+
+	return nil
 }
 
 func (d *Demuxer) buildTracks(sdpBody string) ([]*rtspTrack, []av.Stream, error) {
@@ -466,10 +723,18 @@ type rtspTrack struct {
 
 	h264Decoder *h264RTPDecoder
 	h265Parser  h265parser.Parser
+	aacDecoder  *aacRTPDecoder
+	audioCodec  av.AudioCodecData
+	ssrc        uint32
+
+	haveSenderReport bool
+	srRTPBase        uint32
+	srWallClock      time.Time
 
 	haveRTPBase bool
 	lastRTP     uint32
 	totalRTP    int64
+	dtsBase     time.Duration
 	lastDTS     time.Duration
 	haveLastDTS bool
 	lastDur     time.Duration
@@ -491,6 +756,25 @@ func newTrack(idx uint16, cd av.CodecData) (*rtspTrack, error) {
 	case h265parser.CodecData:
 		tr.controlURL = v.ControlURL
 
+	case codec.RTSPAudioCodecData:
+		tr.controlURL = v.ControlURL
+		tr.clockRate = v.RTPClockRate()
+		tr.audioCodec = v
+
+		switch v.Type() {
+		case av.AAC:
+			aacDecoder, err := newAACRTPDecoder(v.Fmtp)
+			if err != nil {
+				return nil, err
+			}
+
+			tr.aacDecoder = aacDecoder
+		case av.PCM_MULAW, av.PCM_ALAW, av.OPUS:
+			// No additional depacketizer state required.
+		default:
+			return nil, fmt.Errorf("unsupported audio codec type: %s", v.Type())
+		}
+
 	default:
 		return nil, fmt.Errorf("unsupported codec type: %s", cd.Type())
 	}
@@ -499,16 +783,37 @@ func newTrack(idx uint16, cd av.CodecData) (*rtspTrack, error) {
 }
 
 func (t *rtspTrack) decodeRTP(pkt *rtp.Packet) ([]av.Packet, error) {
+	if t.ssrc == 0 {
+		t.ssrc = pkt.SSRC
+	}
+
 	dts := t.decodeDTS(pkt.Timestamp)
+
+	var (
+		out []av.Packet
+		err error
+	)
 
 	switch t.codecType {
 	case av.H264:
-		return t.decodeH264(pkt, dts)
+		out, err = t.decodeH264(pkt, dts)
 	case av.H265:
-		return t.decodeH265(pkt, dts)
+		out, err = t.decodeH265(pkt, dts)
+	case av.AAC:
+		out, err = t.decodeAAC(pkt, dts)
+	case av.PCM_MULAW, av.PCM_ALAW, av.OPUS:
+		out, err = t.decodeAudio(pkt.Payload, dts)
 	default:
 		return nil, nil
 	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	t.applyWallClock(pkt.Timestamp, out)
+
+	return out, nil
 }
 
 func (t *rtspTrack) decodeDTS(ts uint32) time.Duration {
@@ -517,13 +822,13 @@ func (t *rtspTrack) decodeDTS(ts uint32) time.Duration {
 		t.lastRTP = ts
 		t.totalRTP = 0
 
-		return 0
+		return t.dtsBase
 	}
 
 	t.totalRTP += int64(int32(ts - t.lastRTP))
 	t.lastRTP = ts
 
-	dts := time.Duration(t.totalRTP) * time.Second / time.Duration(t.clockRate)
+	dts := t.dtsBase + time.Duration(t.totalRTP)*time.Second/time.Duration(t.clockRate)
 	if t.haveLastDTS && dts < t.lastDTS {
 		return t.lastDTS
 	}
@@ -590,6 +895,60 @@ func (t *rtspTrack) decodeH265(pkt *rtp.Packet, dts time.Duration) ([]av.Packet,
 	return []av.Packet{out}, nil
 }
 
+func (t *rtspTrack) decodeAAC(pkt *rtp.Packet, dts time.Duration) ([]av.Packet, error) {
+	if t.aacDecoder == nil {
+		return nil, fmt.Errorf("rtsp: missing AAC depacketizer")
+	}
+
+	aus, err := t.aacDecoder.Decode(pkt)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(aus) == 0 {
+		return nil, nil
+	}
+
+	out := make([]av.Packet, 0, len(aus))
+	curDTS := dts
+
+	for _, au := range aus {
+		dur := t.packetDuration(au)
+		out = append(out, av.Packet{
+			Idx:       t.idx,
+			CodecType: t.codecType,
+			DTS:       curDTS,
+			Duration:  dur,
+			Data:      au,
+		})
+
+		t.lastDTS = curDTS
+		t.haveLastDTS = true
+		t.lastDur = dur
+		curDTS += dur
+	}
+
+	return out, nil
+}
+
+func (t *rtspTrack) decodeAudio(payload []byte, dts time.Duration) ([]av.Packet, error) {
+	dur := t.packetDuration(payload)
+
+	out := av.Packet{
+		Idx:       t.idx,
+		CodecType: t.codecType,
+		DTS:       dts,
+		Duration:  dur,
+		Data:      append([]byte(nil), payload...),
+	}
+
+	t.lastDTS = dts
+	t.haveLastDTS = true
+	t.lastDur = dur
+
+	return []av.Packet{out}, nil
+}
+
 func (t *rtspTrack) estimateDuration(data []byte, dts time.Duration) time.Duration {
 	if t.haveLastDTS && dts > t.lastDTS {
 		return dts - t.lastDTS
@@ -599,14 +958,187 @@ func (t *rtspTrack) estimateDuration(data []byte, dts time.Duration) time.Durati
 		return t.lastDur
 	}
 
-	if pd, ok := t.codec.(interface{ PacketDuration([]byte) time.Duration }); ok {
-		d := pd.PacketDuration(data)
-		if d > 0 {
+	if pd, ok := t.codec.(interface {
+		PacketDuration([]byte) (time.Duration, error)
+	}); ok {
+		d, err := pd.PacketDuration(data)
+		if err == nil && d > 0 {
 			return d
 		}
 	}
 
 	return 40 * time.Millisecond
+}
+
+func (t *rtspTrack) packetDuration(data []byte) time.Duration {
+	if t.audioCodec == nil {
+		return t.estimateDuration(data, t.lastDTS)
+	}
+
+	dur, err := t.audioCodec.PacketDuration(data)
+	if err == nil && dur > 0 {
+		return dur
+	}
+
+	if t.lastDur > 0 {
+		return t.lastDur
+	}
+
+	return 20 * time.Millisecond
+}
+
+func (t *rtspTrack) handleRTCP(payload []byte) error {
+	reports, err := parseSenderReports(payload)
+	if err != nil {
+		return err
+	}
+
+	for _, report := range reports {
+		if t.ssrc != 0 && report.ssrc != t.ssrc {
+			continue
+		}
+
+		t.haveSenderReport = true
+		t.ssrc = report.ssrc
+		t.srRTPBase = report.rtpTimestamp
+		t.srWallClock = report.ntpTime
+	}
+
+	return nil
+}
+
+func (t *rtspTrack) applyWallClock(rtpTimestamp uint32, pkts []av.Packet) {
+	if !t.haveSenderReport || len(pkts) == 0 {
+		return
+	}
+
+	base := t.wallClockForRTP(rtpTimestamp)
+	if base.IsZero() {
+		return
+	}
+
+	cur := base
+	for i := range pkts {
+		pkts[i].WallClockTime = cur
+		cur = cur.Add(pkts[i].Duration)
+	}
+}
+
+func (t *rtspTrack) wallClockForRTP(rtpTimestamp uint32) time.Time {
+	if !t.haveSenderReport || t.clockRate <= 0 {
+		return time.Time{}
+	}
+
+	delta := int64(int32(rtpTimestamp - t.srRTPBase))
+	offset := time.Duration(delta) * time.Second / time.Duration(t.clockRate)
+
+	return t.srWallClock.Add(offset)
+}
+
+func carryTrackState(oldTracks []*rtspTrack, newTracks []*rtspTrack) {
+	for i, next := range newTracks {
+		var prev *rtspTrack
+
+		for _, candidate := range oldTracks {
+			if candidate.codecType == next.codecType && candidate.controlURL == next.controlURL {
+				prev = candidate
+				break
+			}
+		}
+
+		if prev == nil && i < len(oldTracks) && oldTracks[i].codecType == next.codecType {
+			prev = oldTracks[i]
+		}
+
+		if prev == nil || !prev.haveLastDTS {
+			continue
+		}
+
+		next.dtsBase = prev.lastDTS + prev.lastDur
+		next.lastDur = prev.lastDur
+	}
+}
+
+func (d *Demuxer) handleInterleavedPayloadLocked(ch uint8, payload []byte) error {
+	if (ch % 2) == 1 {
+		tr, ok := d.trackByRTPCh[ch-1]
+		if !ok {
+			return nil
+		}
+
+		return tr.handleRTCP(payload)
+	}
+
+	tr, ok := d.trackByRTPCh[ch]
+	if !ok {
+		return nil
+	}
+
+	var rtpPacket rtp.Packet
+	if err := rtpPacket.Unmarshal(payload); err != nil {
+		return err
+	}
+
+	pkts, err := tr.decodeRTP(&rtpPacket)
+	if err != nil {
+		return err
+	}
+
+	d.appendPendingLocked(pkts)
+
+	return nil
+}
+
+func (d *Demuxer) appendPendingLocked(pkts []av.Packet) {
+	if len(pkts) == 0 {
+		return
+	}
+
+	if d.pendingDiscontinuity {
+		pkts[0].IsDiscontinuity = true
+		d.pendingDiscontinuity = false
+	}
+
+	d.pending = append(d.pending, pkts...)
+}
+
+func (d *Demuxer) popPendingLocked() av.Packet {
+	pkt := d.pending[0]
+	d.pending = d.pending[1:]
+
+	return pkt
+}
+
+func (d *Demuxer) waitIfPaused(ctx context.Context) error {
+	if !d.paused.Load() {
+		return nil
+	}
+
+	d.pauseMu.Lock()
+	ch := d.pauseCh
+	d.pauseMu.Unlock()
+
+	if ch == nil {
+		return nil
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-ch:
+		return nil
+	}
+}
+
+func (d *Demuxer) resumeReadersLocked() {
+	d.pauseMu.Lock()
+	ch := d.pauseCh
+	d.pauseCh = nil
+	d.pauseMu.Unlock()
+
+	if ch != nil {
+		close(ch)
+	}
 }
 
 func h264AccessUnitIsKeyFrame(nalus [][]byte) bool {

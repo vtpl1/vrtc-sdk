@@ -22,14 +22,35 @@ A Go library for building audio/video pipelines. It provides the core data model
 | `av/codec/aacparser` | MPEG-4 audio config, ADTS framing |
 | `av/codec/pcm` | PCM/FLAC/µ-law/A-law codec data and transcoding |
 | `av/codec/parser` | Generic NALU splitting and format detection (raw / Annex B / AVCC) |
-| `av/codec` | SDP → `[]CodecData` parsing; Opus codec data |
+| `av/codec` | SDP → `[]CodecData` parsing for RTSP media tracks; Opus and RTSP audio codec wrappers |
 | `av/format/fmp4` | Fragmented MP4 (ISO 14496-12) muxer and demuxer |
 | `av/format/mp4` | Standard MP4 muxer and demuxer |
 | `av/format/grpc` | gRPC transport: PushStream (client→server) and PullStream (server→client) with pause/seek |
-| `av/format/rtsp` | RTSP demuxer with RTP/H.264 packet reassembly |
+| `av/format/rtsp` | RTSP demuxer with TCP interleaved RTP/RTCP, H.264/H.265/AAC/PCMU/PCMA/Opus support, keepalive, reconnect, pause/resume |
 | `av/format/llhls` | Low-Latency HLS (CMAF) muxer with built-in HTTP handler |
 | `av/format/mse` | fMP4-over-WebSocket muxer for browser Media Source Extensions |
 | `lifecycle` | `StartStopper` / `Stopper` interfaces and signal helpers |
+
+---
+
+## RTSP status
+
+`av/format/rtsp` currently supports:
+
+- RTSP over TCP interleaved RTP/RTCP
+- H.264 and H.265 video
+- AAC (`MPEG4-GENERIC`), PCMU, PCMA, and Opus audio
+- RTCP Sender Report parsing with `Packet.WallClockTime` population
+- keepalive, reconnect, discontinuity signaling, and `av.Pauser`
+
+Not yet implemented:
+
+- UDP transport / multicast
+- `rtsps` TLS
+- additional audio codecs such as G.722 / G.726 / L16
+- broader end-to-end camera interoperability coverage
+
+The phased implementation backlog for the RTSP demuxer is tracked in [docs/rtsp_demuxer_plan.md](./docs/rtsp_demuxer_plan.md).
 
 ---
 

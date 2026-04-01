@@ -2,14 +2,10 @@
 package codec_test
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/vtpl1/vrtc-sdk/av"
 	"github.com/vtpl1/vrtc-sdk/av/codec"
-	"github.com/vtpl1/vrtc-sdk/av/codec/h264parser"
-	"github.com/vtpl1/vrtc-sdk/av/codec/h265parser"
-	"github.com/vtpl1/vrtc-sdk/av/codec/pcm"
 )
 
 const MPEG4UnmarshalSDP = "v=0\r\n" +
@@ -95,34 +91,30 @@ const H265UnmarshalSDP = "v=0\r\n" +
 	"a=rtpmap:107 vnd.onvif.metadata/90000\r\n" +
 	"a=recvonly\r\n"
 
-func tt(av.AudioCodecData) {
-}
-
-func TestAudioCodecs(_ *testing.T) {
-	s := pcm.SpeexCodecData{}
-	tt(s)
-}
-
 func TestSdpToCodecs(t *testing.T) {
 	tests := []struct {
 		name    string
 		s       string
-		wantRet []av.CodecData
+		want    []av.CodecType
 		wantErr bool
 	}{
 		{
 			name: "H264UnamarshalSDP",
 			s:    H264UnamarshalSDP,
+			want: []av.CodecType{av.H264, av.PCM_MULAW},
 		},
 		{
 			name: "MPEG4UnmarshalSDP",
 			s:    MPEG4UnmarshalSDP,
+			want: []av.CodecType{av.H264, av.AAC, av.PCM_MULAW},
 		},
 		{
 			name: "H265UnmarshalSDP",
 			s:    H265UnmarshalSDP,
+			want: []av.CodecType{av.H265, av.PCM_MULAW},
 		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gotRet, err := codec.SdpToCodecs(tt.s)
@@ -132,14 +124,96 @@ func TestSdpToCodecs(t *testing.T) {
 				return
 			}
 
-			for _, codec := range gotRet {
-				switch v := codec.(type) {
-				case h264parser.CodecData:
-					fmt.Println(v.Width(), v.Height())
-				case h265parser.CodecData:
-					fmt.Println(v.Width(), v.Height())
+			if len(gotRet) != len(tt.want) {
+				t.Fatalf("len(SdpToCodecs()) = %d, want %d", len(gotRet), len(tt.want))
+			}
+
+			for i, got := range gotRet {
+				if got.Type() != tt.want[i] {
+					t.Fatalf("codec[%d].Type() = %v, want %v", i, got.Type(), tt.want[i])
 				}
 			}
 		})
+	}
+}
+
+func TestSdpToCodecs_AudioTrackMetadata(t *testing.T) {
+	gotRet, err := codec.SdpToCodecs(MPEG4UnmarshalSDP)
+	if err != nil {
+		t.Fatalf("SdpToCodecs() error = %v", err)
+	}
+
+	if len(gotRet) != 3 {
+		t.Fatalf("len(SdpToCodecs()) = %d, want 3", len(gotRet))
+	}
+
+	aac, ok := gotRet[1].(codec.RTSPAudioCodecData)
+	if !ok {
+		t.Fatalf("codec[1] type = %T, want codec.RTSPAudioCodecData", gotRet[1])
+	}
+
+	if aac.ControlURL != "track2" {
+		t.Fatalf("aac.ControlURL = %q, want %q", aac.ControlURL, "track2")
+	}
+
+	if aac.RTPClockRate() != 16000 {
+		t.Fatalf("aac.RTPClockRate() = %d, want 16000", aac.RTPClockRate())
+	}
+
+	if aac.FMTPValue("sizelength") != "13" {
+		t.Fatalf("aac FMTP sizelength = %q, want 13", aac.FMTPValue("sizelength"))
+	}
+
+	pcmu, ok := gotRet[2].(codec.RTSPAudioCodecData)
+	if !ok {
+		t.Fatalf("codec[2] type = %T, want codec.RTSPAudioCodecData", gotRet[2])
+	}
+
+	if pcmu.ControlURL != "rtsp://109.195.127.207:554/mpeg4cif/trackID=2" {
+		t.Fatalf("pcmu.ControlURL = %q", pcmu.ControlURL)
+	}
+
+	if pcmu.RTPClockRate() != 8000 {
+		t.Fatalf("pcmu.RTPClockRate() = %d, want 8000", pcmu.RTPClockRate())
+	}
+
+	if pcmu.Type() != av.PCM_MULAW {
+		t.Fatalf("pcmu.Type() = %v, want %v", pcmu.Type(), av.PCM_MULAW)
+	}
+}
+
+func TestSdpToCodecs_Opus(t *testing.T) {
+	s := "v=0\r\n" +
+		"o=- 0 0 IN IP4 127.0.0.1\r\n" +
+		"s=Opus test\r\n" +
+		"t=0 0\r\n" +
+		"m=audio 0 RTP/AVP 111\r\n" +
+		"a=rtpmap:111 opus/48000/2\r\n" +
+		"a=control:trackID=1\r\n"
+
+	gotRet, err := codec.SdpToCodecs(s)
+	if err != nil {
+		t.Fatalf("SdpToCodecs() error = %v", err)
+	}
+
+	if len(gotRet) != 1 {
+		t.Fatalf("len(SdpToCodecs()) = %d, want 1", len(gotRet))
+	}
+
+	opus, ok := gotRet[0].(codec.RTSPAudioCodecData)
+	if !ok {
+		t.Fatalf("codec[0] type = %T, want codec.RTSPAudioCodecData", gotRet[0])
+	}
+
+	if opus.Type() != av.OPUS {
+		t.Fatalf("opus.Type() = %v, want %v", opus.Type(), av.OPUS)
+	}
+
+	if opus.RTPClockRate() != 48000 {
+		t.Fatalf("opus.RTPClockRate() = %d, want 48000", opus.RTPClockRate())
+	}
+
+	if opus.ControlURL != "trackID=1" {
+		t.Fatalf("opus.ControlURL = %q, want trackID=1", opus.ControlURL)
 	}
 }

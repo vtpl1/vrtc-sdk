@@ -4,7 +4,8 @@ import "errors"
 
 var (
 	ErrNotStarted            = errors.New("rtsp: demuxer is not started")
-	ErrNoSupportedVideoTrack = errors.New("rtsp: no supported video track in SDP")
+	ErrNoSupportedTrack      = errors.New("rtsp: no supported audio/video track in SDP")
+	ErrNoSupportedVideoTrack = ErrNoSupportedTrack
 	ErrUnexpectedStatusLine  = errors.New("rtsp: malformed status line")
 	ErrUnexpectedInterleaved = errors.New("rtsp: unexpected interleaved frame")
 )
