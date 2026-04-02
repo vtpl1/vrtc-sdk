@@ -201,7 +201,11 @@ func (m *SegmentMuxer) Close() error {
 	m.closed = true
 	endTime := time.Now().UTC()
 
-	if err := m.WriteTrailer(context.Background(), nil); err != nil && !errors.Is(err, fmp4.ErrTrailerAlreadyWritten) {
+	if err := m.WriteTrailer(
+		context.Background(),
+		nil,
+	); err != nil &&
+		!errors.Is(err, fmp4.ErrTrailerAlreadyWritten) {
 		return err
 	}
 
@@ -225,6 +229,11 @@ func (m *SegmentMuxer) Close() error {
 	}
 
 	return err
+}
+
+// BytesWritten returns the total bytes written to disk so far.
+func (m *SegmentMuxer) BytesWritten() int64 {
+	return m.writer.BytesWritten()
 }
 
 // writeSidx writes a sidx box to the segment file using the fragment index
@@ -254,11 +263,6 @@ func (m *SegmentMuxer) writeSidx() {
 	} else {
 		_, _ = m.writer.Write(sidx)
 	}
-}
-
-// BytesWritten returns the total bytes written to disk so far.
-func (m *SegmentMuxer) BytesWritten() int64 {
-	return m.writer.BytesWritten()
 }
 
 // teeWriter copies all writes to disk and captures bytes written during a

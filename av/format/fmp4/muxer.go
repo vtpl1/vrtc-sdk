@@ -526,7 +526,8 @@ func (m *Muxer) flushFragment() error {
 
 	startsWithSAP := false
 
-	for _, ts := range active {
+	if len(active) > 0 {
+		ts := active[0]
 		fragPTS = ticksToDuration(ts.baseTime, ts.timescale)
 
 		var totalDur int64
@@ -539,8 +540,6 @@ func (m *Muxer) flushFragment() error {
 		if ts.hasVideo && len(ts.samples) > 0 {
 			startsWithSAP = ts.samples[0].flags == sampleFlagsKeyframe
 		}
-
-		break
 	}
 
 	if len(emsgs) > 0 {

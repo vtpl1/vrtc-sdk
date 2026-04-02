@@ -13,6 +13,10 @@ import (
 	"github.com/vtpl1/vrtc-sdk/av/format/fmp4"
 )
 
+// ErrSeekNotSupported is returned when Seek is called on a source that does
+// not implement SeekableSegmentSource.
+var ErrSeekNotSupported = errors.New("chain: source does not support seeking")
+
 // Compile-time interface check.
 var _ av.DemuxCloser = (*ChainingDemuxer)(nil)
 
@@ -134,10 +138,14 @@ type SeekableSegmentSource interface {
 //
 // The source must implement SeekableSegmentSource; if it does not, Seek returns
 // an error. After Seek, the next ReadPacket returns packets from the target position.
-func (c *ChainingDemuxer) Seek(ctx context.Context, wallTime time.Time, seekPTS time.Duration) error {
+func (c *ChainingDemuxer) Seek(
+	ctx context.Context,
+	wallTime time.Time,
+	seekPTS time.Duration,
+) error {
 	ss, ok := c.source.(SeekableSegmentSource)
 	if !ok {
-		return errors.New("chain: source does not support seeking")
+		return ErrSeekNotSupported
 	}
 
 	// Close the current demuxer.

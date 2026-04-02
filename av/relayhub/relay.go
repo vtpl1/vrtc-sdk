@@ -472,6 +472,7 @@ func (m *Relay) readWriteLoop(ctx context.Context) {
 
 				if pkt.CodecType.IsVideo() {
 					cached := pkt
+
 					m.lastKeyMu.Lock()
 					m.lastKeyframe = &cached
 					m.lastKeyMu.Unlock()
