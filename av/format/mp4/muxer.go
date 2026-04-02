@@ -189,7 +189,7 @@ func (m *Muxer) Close() error {
 //  5. Rebuild moov with correct stco values (same size as pass 1).
 //  6. Write ftyp + moov_final + mdat.
 func (m *Muxer) flush() error {
-	ftyp := buildFtyp()
+	ftyp := buildFtyp(m.tracks)
 	ftypSize := int64(len(ftyp))
 
 	// Pass 1: measure moov size.
@@ -761,13 +761,21 @@ func buildMvhd(durationMs uint32) []byte {
 
 // ── ftyp ──────────────────────────────────────────────────────────────────────
 
-func buildFtyp() []byte {
+func buildFtyp(tracks []*mp4Track) []byte {
+	codecBrand := "avc1" // default for H.264
+	for _, t := range tracks {
+		if _, ok := t.codec.(h265parser.CodecData); ok {
+			codecBrand = "hev1"
+			break
+		}
+	}
+
 	var p bytes.Buffer
 	p.WriteString("isom")       // major_brand
 	writeUint32(&p, 0x00000200) // minor_version
 	p.WriteString("isom")       // compatible_brands
 	p.WriteString("iso2")
-	p.WriteString("avc1")
+	p.WriteString(codecBrand)
 	p.WriteString("mp41")
 
 	return makeBox("ftyp", p.Bytes())

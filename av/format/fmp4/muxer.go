@@ -596,20 +596,30 @@ func durationToTimescale(d time.Duration, timescale uint32) int64 {
 
 func buildInitSegment(tracks []*trackState) []byte {
 	var b bytes.Buffer
-	b.Write(buildFtyp())
+	b.Write(buildFtyp(tracks))
 	b.Write(buildMoov(tracks))
 
 	return b.Bytes()
 }
 
 // buildFtyp builds an ftyp box compatible with ISOBMFF and common players.
-func buildFtyp() []byte {
+// The codec-specific compatible brand (avc1 or hev1) is chosen based on the
+// video codec present in tracks.
+func buildFtyp(tracks []*trackState) []byte {
+	codecBrand := "avc1" // default for H.264
+	for _, ts := range tracks {
+		if _, ok := ts.codec.(h265parser.CodecData); ok {
+			codecBrand = "hev1"
+			break
+		}
+	}
+
 	var p bytes.Buffer
 	p.WriteString("isom")       // major_brand
 	writeUint32(&p, 0x00000200) // minor_version = 512
 	p.WriteString("isom")       // compatible_brand
 	p.WriteString("iso5")
-	p.WriteString("avc1")
+	p.WriteString(codecBrand)
 	p.WriteString("mp41")
 
 	return makeBox("ftyp", p.Bytes())
