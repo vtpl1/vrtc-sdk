@@ -437,3 +437,100 @@ type funcSource struct {
 func (f *funcSource) Next(ctx context.Context) (av.DemuxCloser, error) {
 	return f.fn(ctx)
 }
+
+// ── Seek tests ──────────────────────────────────────────────────────────────
+
+// seekableSource implements chain.SeekableSegmentSource for testing.
+type seekableSource struct {
+	bytesSource
+	segments map[string][]byte // wall-clock key → segment bytes
+}
+
+func (s *seekableSource) OpenAt(_ context.Context, ts time.Time) (av.DemuxCloser, error) {
+	key := ts.Format(time.RFC3339)
+
+	data, ok := s.segments[key]
+	if !ok {
+		return nil, io.EOF
+	}
+
+	return fmp4.NewDemuxer(bytes.NewReader(data)), nil
+}
+
+func TestChainingDemuxer_Seek_NotSeekable(t *testing.T) {
+	t.Parallel()
+
+	seg := makeSegment(t, 3)
+	first := demuxerFromBytes(seg)
+
+	// emptySource does not implement SeekableSegmentSource.
+	cd := chain.NewChainingDemuxer(first, emptySource{})
+	ctx := context.Background()
+
+	if _, err := cd.GetCodecs(ctx); err != nil {
+		t.Fatalf("GetCodecs: %v", err)
+	}
+
+	err := cd.Seek(ctx, time.Now(), 0)
+	if err == nil {
+		t.Fatal("Seek should fail on non-seekable source")
+	}
+}
+
+func TestChainingDemuxer_Seek_SeekableSource(t *testing.T) {
+	t.Parallel()
+
+	seg1 := makeSegment(t, 3)
+	seg2 := makeSegment(t, 5)
+
+	wallTime := time.Date(2026, 4, 2, 12, 0, 0, 0, time.UTC)
+
+	src := &seekableSource{
+		segments: map[string][]byte{
+			wallTime.Format(time.RFC3339): seg2,
+		},
+	}
+
+	first := demuxerFromBytes(seg1)
+	cd := chain.NewChainingDemuxer(first, src)
+	ctx := context.Background()
+
+	if _, err := cd.GetCodecs(ctx); err != nil {
+		t.Fatalf("GetCodecs: %v", err)
+	}
+
+	// Read one packet from the first segment.
+	pkt, err := cd.ReadPacket(ctx)
+	if err != nil {
+		t.Fatalf("ReadPacket: %v", err)
+	}
+
+	if pkt.DTS != 0 {
+		t.Errorf("first packet DTS want 0, got %v", pkt.DTS)
+	}
+
+	// Seek to the second segment.
+	if err := cd.Seek(ctx, wallTime, 0); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+
+	// After seek, we should be reading from seg2 (which has 5 packets).
+	var pkts []av.Packet
+
+	for {
+		p, err := cd.ReadPacket(ctx)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		if err != nil {
+			t.Fatalf("ReadPacket after seek: %v", err)
+		}
+
+		pkts = append(pkts, p)
+	}
+
+	if len(pkts) != 5 {
+		t.Fatalf("expected 5 packets from sought segment, got %d", len(pkts))
+	}
+}

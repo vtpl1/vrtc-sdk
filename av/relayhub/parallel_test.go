@@ -1880,3 +1880,159 @@ func TestConsumerErrChanHighLoad(t *testing.T) {
 
 	t.Logf("received %d/%d muxer errors (≥50%% threshold met)", received, numConsumers)
 }
+
+// ── Keyframe cache tests ────────────────────────────────────────────────────
+
+// keyframeDemuxer emits video packets, alternating between keyframes and
+// non-keyframes. Packets have CodecType set to H264 so the relay caches
+// keyframes.
+type keyframeDemuxer struct {
+	streams []av.Stream
+	pktIdx  atomic.Int64
+}
+
+func (d *keyframeDemuxer) GetCodecs(_ context.Context) ([]av.Stream, error) {
+	return d.streams, nil
+}
+
+func (d *keyframeDemuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
+	if err := ctx.Err(); err != nil {
+		return av.Packet{}, err
+	}
+
+	n := d.pktIdx.Add(1)
+
+	return av.Packet{
+		KeyFrame:  n%5 == 1, // keyframe every 5th packet
+		DTS:       time.Duration(n) * (time.Second / 250),
+		CodecType: av.H264, // must be video type for keyframe cache
+		Idx:       0,
+		Data:      []byte{byte(n)},
+	}, nil
+}
+
+func (d *keyframeDemuxer) Close() error { return nil }
+
+// recordingMuxer records all packets written to it.
+type recordingMuxer struct {
+	mu   sync.Mutex
+	pkts []av.Packet
+}
+
+func (m *recordingMuxer) WriteHeader(_ context.Context, _ []av.Stream) error { return nil }
+func (m *recordingMuxer) WritePacket(_ context.Context, pkt av.Packet) error {
+	m.mu.Lock()
+	m.pkts = append(m.pkts, pkt)
+	m.mu.Unlock()
+
+	return nil
+}
+func (m *recordingMuxer) WriteTrailer(_ context.Context, _ error) error { return nil }
+func (m *recordingMuxer) Close() error                                  { return nil }
+
+func (m *recordingMuxer) packets() []av.Packet {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return append([]av.Packet(nil), m.pkts...)
+}
+
+// TestKeyframeCacheForLateJoiner verifies that a consumer added after the relay
+// is already producing packets receives the cached last video keyframe as its
+// first packet (instant live view start).
+func TestKeyframeCacheForLateJoiner(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+
+	streams := []av.Stream{{Idx: 0, Codec: fakeVideoCodec{typ: av.H264, width: 320, height: 240, timeScale: 90000}}}
+
+	sm := relayhub.New(func(_ context.Context, _ string) (av.DemuxCloser, error) {
+		return &keyframeDemuxer{streams: streams}, nil
+	}, nil)
+
+	if err := sm.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() { _ = sm.Stop() }()
+
+	// Add first consumer to start the relay and get packets flowing.
+	firstMux := &recordingMuxer{}
+
+	h1, err := sm.Consume(ctx, "src1", av.ConsumeOptions{
+		ConsumerID: "c1",
+		MuxerFactory: func(_ context.Context, _ string) (av.MuxCloser, error) {
+			return firstMux, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Consume c1: %v", err)
+	}
+
+	defer func() { _ = h1.Close(ctx) }()
+
+	// Wait until the first consumer has received enough packets that at least
+	// one keyframe has been cached by the relay.
+	deadline := time.After(5 * time.Second)
+
+	for {
+		pkts := firstMux.packets()
+
+		hasKeyframe := false
+		for _, p := range pkts {
+			if p.KeyFrame {
+				hasKeyframe = true
+
+				break
+			}
+		}
+
+		if hasKeyframe && len(pkts) > 5 {
+			break
+		}
+
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for first consumer to receive a keyframe")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// Now add a late-joining consumer.
+	lateMux := &recordingMuxer{}
+
+	h2, err := sm.Consume(ctx, "src1", av.ConsumeOptions{
+		ConsumerID: "c2",
+		MuxerFactory: func(_ context.Context, _ string) (av.MuxCloser, error) {
+			return lateMux, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Consume c2: %v", err)
+	}
+
+	defer func() { _ = h2.Close(ctx) }()
+
+	// Wait for the late consumer to receive at least one packet.
+	deadline = time.After(5 * time.Second)
+
+	for {
+		pkts := lateMux.packets()
+		if len(pkts) > 0 {
+			// The first packet delivered to the late consumer should be a keyframe
+			// (from the cache).
+			if !pkts[0].KeyFrame {
+				t.Error("late-joining consumer's first packet should be a cached keyframe")
+			}
+
+			break
+		}
+
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for late consumer to receive packets")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}

@@ -101,6 +101,24 @@ type Muxer struct {
 	// starts on a sync sample. This covers the common late-join scenario where a
 	// new consumer attaches mid-GOP and would otherwise receive leading P-frames.
 	waitingForKeyframe bool
+
+	// Fragment index tracking for sidx box generation.
+	// Each entry records metadata for one flushed moof+mdat pair.
+	fragIndex []FragmentIndex
+
+	// bytesWritten tracks the cumulative bytes written to the underlying writer,
+	// used to compute fragment byte offsets for the sidx index.
+	bytesWritten int64
+}
+
+// FragmentIndex records metadata for one flushed moof+mdat fragment,
+// used to build a sidx box for frame-accurate seek.
+type FragmentIndex struct {
+	PTS           time.Duration // base decode time of the fragment
+	Duration      time.Duration // total duration of all samples in the fragment
+	Offset        int64         // byte offset of the moof box from the start of the file
+	Size          int64         // total bytes of the moof+mdat pair
+	StartsWithSAP bool          // true if the first video sample is a keyframe
 }
 
 // NewMuxer returns a Muxer that writes fMP4 data to w.
@@ -144,6 +162,7 @@ func (m *Muxer) WriteHeader(_ context.Context, streams []av.Stream) error {
 		return err
 	}
 
+	m.bytesWritten += int64(len(init))
 	m.written = true
 	m.waitingForKeyframe = m.hasVideoTracks()
 
@@ -299,6 +318,55 @@ func (m *Muxer) WriteCodecChange(_ context.Context, changed []av.Stream) error {
 	_, err := m.w.Write(buildInitSegment(m.tracks))
 
 	return err
+}
+
+// FragIndex returns the accumulated fragment index entries. This is available
+// after WriteTrailer (or Close) and is used by callers (e.g. SegmentMuxer) to
+// write a sidx box for frame-accurate seek.
+func (m *Muxer) FragIndex() []FragmentIndex {
+	return m.fragIndex
+}
+
+// BuildSidx builds a sidx box (ISO 14496-12 §8.16.3) from the given fragment
+// index entries. The sidx box maps PTS ranges to byte offsets for O(1) seek.
+// trackTimescale is the timescale of the reference track (typically the video track).
+func BuildSidx(entries []FragmentIndex, trackTimescale uint32) []byte {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// Reference ID = 1 (first track).
+	var p bytes.Buffer
+
+	// reference_ID (4)
+	writeUint32(&p, 1)
+	// timescale (4)
+	writeUint32(&p, trackTimescale)
+	// earliest_presentation_time (8, version=1) — use first entry's PTS
+	writeUint64(&p, uint64(dtsToTimescale(entries[0].PTS, trackTimescale)))
+	// first_offset (8, version=1) — 0, offsets in entries are absolute
+	writeUint64(&p, 0)
+	// reserved (2) + reference_count (2)
+	writeUint16(&p, 0)
+	writeUint16(&p, uint16(len(entries)))
+
+	for _, e := range entries {
+		// referenced_size (31 bits), reference_type=0 (1 bit, MSB)
+		refSize := uint32(e.Size) & 0x7FFFFFFF
+		writeUint32(&p, refSize)
+		// subsegment_duration
+		writeUint32(&p, uint32(dtsToTimescale(e.Duration, trackTimescale)))
+		// starts_with_SAP (1 bit) + SAP_type (3 bits) + SAP_delta_time (28 bits)
+		word := uint32(0)
+		if e.StartsWithSAP {
+			word |= 0x80000000 // starts_with_SAP = 1
+			word |= 0x10000000 // SAP_type = 1 (closed GOP)
+		}
+
+		writeUint32(&p, word)
+	}
+
+	return makeFullBox("sidx", 1, 0, p.Bytes())
 }
 
 // ── internal helpers ─────────────────────────────────────────────────────────
@@ -471,19 +539,59 @@ func (m *Muxer) flushFragment() error {
 	moof := buildMoof(active, m.seqNum, dataOffsets)
 	mdat := buildMdat(active)
 
+	// Record fragment metadata for sidx index before writing.
+	fragOffset := m.bytesWritten + int64(len(emsgs))
+	fragSize := int64(len(moof) + len(mdat))
+
+	// Compute base PTS and total duration from the first active track.
+	var fragPTS time.Duration
+	var fragDuration time.Duration
+	startsWithSAP := false
+
+	for _, ts := range active {
+		fragPTS = ticksToDuration(ts.baseTime, ts.timescale)
+
+		var totalDur int64
+		for _, s := range ts.samples {
+			totalDur += int64(s.duration)
+		}
+
+		fragDuration = ticksToDuration(totalDur, ts.timescale)
+
+		if ts.hasVideo && len(ts.samples) > 0 {
+			startsWithSAP = ts.samples[0].flags == sampleFlagsKeyframe
+		}
+
+		break
+	}
+
 	if len(emsgs) > 0 {
 		if _, err := m.w.Write(emsgs); err != nil {
 			return err
 		}
+
+		m.bytesWritten += int64(len(emsgs))
 	}
 
 	if _, err := m.w.Write(moof); err != nil {
 		return err
 	}
 
+	m.bytesWritten += int64(len(moof))
+
 	if _, err := m.w.Write(mdat); err != nil {
 		return err
 	}
+
+	m.bytesWritten += int64(len(mdat))
+
+	m.fragIndex = append(m.fragIndex, FragmentIndex{
+		PTS:           fragPTS,
+		Duration:      fragDuration,
+		Offset:        fragOffset,
+		Size:          fragSize,
+		StartsWithSAP: startsWithSAP,
+	})
 
 	// Advance nextTime and clear sample buffers.
 	for _, ts := range active {

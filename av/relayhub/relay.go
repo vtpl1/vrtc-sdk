@@ -33,6 +33,10 @@ type Relay struct {
 	headersErr       error
 	headersAvailable chan struct{}
 
+	// Cached last video keyframe for instant start of late-joining consumers.
+	lastKeyMu    sync.RWMutex
+	lastKeyframe *av.Packet
+
 	// metrics — updated from readWriteLoop; read via Stats()
 	packetsRead    atomic.Uint64
 	bytesRead      atomic.Uint64
@@ -377,7 +381,20 @@ func (m *Relay) AddConsumer(
 		return ErrRelayClosing
 	}
 
-	return c.WriteHeader(ctx, streams)
+	if err := c.WriteHeader(ctx, streams); err != nil {
+		return err
+	}
+
+	// Send cached keyframe for instant start of late-joining consumers.
+	m.lastKeyMu.RLock()
+	cached := m.lastKeyframe
+	m.lastKeyMu.RUnlock()
+
+	if cached != nil {
+		_ = c.WritePacket(ctx, *cached)
+	}
+
+	return nil
 }
 
 // RemoveConsumer deregisters the consumer with the given ID and closes it.
@@ -452,6 +469,13 @@ func (m *Relay) readWriteLoop(ctx context.Context) {
 
 			if pkt.KeyFrame {
 				m.keyFrames.Add(1)
+
+				if pkt.CodecType.IsVideo() {
+					cached := pkt
+					m.lastKeyMu.Lock()
+					m.lastKeyframe = &cached
+					m.lastKeyMu.Unlock()
+				}
 			}
 
 			m.lastPacketAtNs.Store(time.Now().UnixNano())

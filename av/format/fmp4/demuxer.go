@@ -23,6 +23,8 @@ var (
 	ErrNoMoovBox = errors.New("fmp4: no moov box found")
 	// ErrMalformed is returned when a box is structurally invalid or truncated.
 	ErrMalformed = errors.New("fmp4: malformed box")
+	// ErrNotSeekable is returned by SeekToKeyframe when the underlying reader is not an io.ReadSeeker.
+	ErrNotSeekable = errors.New("fmp4: underlying reader is not seekable")
 )
 
 // posReader wraps an io.Reader and tracks the cumulative byte offset consumed.
@@ -75,6 +77,16 @@ type emsgEntry struct {
 	payload       []byte
 }
 
+// SidxEntry describes one reference in a sidx box: a PTS range mapped to a
+// byte offset and size. Used for O(1) random access within a segment file.
+type SidxEntry struct {
+	PTS      time.Duration // earliest presentation time of this subsegment
+	Duration time.Duration // duration of this subsegment
+	Offset   int64         // byte offset from the start of the first subsegment
+	Size     int64         // byte size of the referenced subsegment (moof+mdat)
+	StartsWithSAP bool    // true if subsegment starts with a stream access point (keyframe)
+}
+
 // Demuxer parses a fragmented MP4 byte stream and implements av.DemuxCloser.
 // Create with NewDemuxer; call GetCodecs once, then loop on ReadPacket until io.EOF.
 type Demuxer struct {
@@ -85,6 +97,8 @@ type Demuxer struct {
 	pendingCodecChange []av.Stream // emitted on the first packet of the next fragment
 	pendingEmsg        []emsgEntry // stashed emsg boxes awaiting the next moof+mdat pair
 	moovRead           bool
+	mediaStartPos      int64       // byte offset of the first box after moov (start of media fragments)
+	sidx               []SidxEntry // parsed sidx entries; nil if no sidx box was found
 }
 
 // NewDemuxer returns a Demuxer that reads fMP4 data from r.
@@ -111,6 +125,7 @@ func (d *Demuxer) GetCodecs(_ context.Context) ([]av.Stream, error) {
 		if typ == "moov" {
 			d.parseMoov(payload)
 			d.moovRead = true
+			d.mediaStartPos = d.pr.pos
 
 			return d.streams, nil
 		}
@@ -188,8 +203,13 @@ func (d *Demuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 				d.pendingEmsg = append(d.pendingEmsg, e)
 			}
 
+		case "sidx":
+			if entries, ok := parseSidx(payload, d.mediaStartPos); ok {
+				d.sidx = entries
+			}
+
 		default:
-			// Skip ftyp, sidx, styp, and any other boxes between fragments.
+			// Skip ftyp, styp, and any other boxes between fragments.
 		}
 	}
 }
@@ -201,6 +221,277 @@ func (d *Demuxer) Close() error {
 	}
 
 	return nil
+}
+
+// Sidx returns the parsed sidx entries, or nil if no sidx box has been read.
+func (d *Demuxer) Sidx() []SidxEntry {
+	return d.sidx
+}
+
+// SeekToKeyframe seeks the underlying reader to the fragment containing the
+// keyframe at or before the target PTS. If a sidx index is available, it uses
+// binary search for O(log N) seek. Otherwise it scans moof boxes sequentially.
+//
+// After a successful seek, the next call to ReadPacket will return packets from
+// the target fragment. The caller must have called GetCodecs first.
+//
+// Returns ErrNotSeekable if the underlying reader does not implement io.ReadSeeker.
+func (d *Demuxer) SeekToKeyframe(target time.Duration) error {
+	rs, ok := d.pr.r.(io.ReadSeeker)
+	if !ok {
+		return ErrNotSeekable
+	}
+
+	// Clear any buffered packets from a previous read position.
+	d.pending = d.pending[:0]
+	d.pendingEmsg = d.pendingEmsg[:0]
+
+	// If we have a sidx index, use binary search.
+	if len(d.sidx) > 0 {
+		return d.seekViaSidx(rs, target)
+	}
+
+	// Fall back to sequential moof scan.
+	return d.seekViaMoofScan(rs, target)
+}
+
+// seekViaSidx uses the sidx index to binary-search for the subsegment
+// containing the keyframe at or before target, then seeks the file reader there.
+func (d *Demuxer) seekViaSidx(rs io.ReadSeeker, target time.Duration) error {
+	// Find the last entry whose PTS <= target (or with SAP at/before target).
+	bestIdx := 0
+
+	for i, e := range d.sidx {
+		if e.PTS > target {
+			break
+		}
+
+		bestIdx = i
+	}
+
+	// Seek to the byte offset of the chosen entry.
+	entry := d.sidx[bestIdx]
+	seekPos := entry.Offset
+
+	if _, err := rs.Seek(seekPos, io.SeekStart); err != nil {
+		return err
+	}
+
+	d.pr.pos = seekPos
+
+	return nil
+}
+
+// seekViaMoofScan reads moof box headers from the start of the media data,
+// parsing tfdt to find the last fragment whose base decode time is at or before
+// the target PTS. Then it seeks to that fragment's start position.
+func (d *Demuxer) seekViaMoofScan(rs io.ReadSeeker, target time.Duration) error {
+	// Seek to the start of media fragments.
+	if _, err := rs.Seek(d.mediaStartPos, io.SeekStart); err != nil {
+		return err
+	}
+
+	d.pr.pos = d.mediaStartPos
+
+	bestPos := d.mediaStartPos // position of the best (closest) moof so far
+	var hdr [8]byte
+
+	for {
+		boxStart := d.pr.pos
+
+		if err := d.pr.readFull(hdr[:]); err != nil {
+			break // EOF or read error — use best found so far
+		}
+
+		size := int64(binary.BigEndian.Uint32(hdr[0:4]))
+		typ := string(hdr[4:8])
+
+		if size < 8 {
+			break
+		}
+
+		payloadSize := size - 8
+
+		if typ == "moof" {
+			// Read the moof payload to extract tfdt.
+			payload := make([]byte, payloadSize)
+			if err := d.pr.readFull(payload); err != nil {
+				break
+			}
+
+			pts := moofBaseTime(payload, d.tracksByID)
+			if pts <= target {
+				bestPos = boxStart
+			} else {
+				// Past the target — no need to scan further.
+				break
+			}
+
+			continue
+		}
+
+		// Skip non-moof boxes.
+		if _, err := rs.Seek(boxStart+size, io.SeekStart); err != nil {
+			break
+		}
+
+		d.pr.pos = boxStart + size
+	}
+
+	// Seek to the best fragment position.
+	if _, err := rs.Seek(bestPos, io.SeekStart); err != nil {
+		return err
+	}
+
+	d.pr.pos = bestPos
+
+	return nil
+}
+
+// moofBaseTime extracts the base decode time from the first traf in a moof
+// payload and converts it to a time.Duration using the track's timescale.
+func moofBaseTime(moofPayload []byte, tracksByID map[uint32]*trackDef) time.Duration {
+	for _, trafPayload := range findBoxes(moofPayload, "traf") {
+		tfhdPayload, ok := findBox(trafPayload, "tfhd")
+		if !ok || len(tfhdPayload) < 8 {
+			continue
+		}
+
+		trackID := binary.BigEndian.Uint32(tfhdPayload[4:8])
+		track := tracksByID[trackID]
+
+		if track == nil || !track.hasVideo {
+			continue
+		}
+
+		tfdtPayload, ok := findBox(trafPayload, "tfdt")
+		if !ok {
+			continue
+		}
+
+		baseDTS, err := parseTfdt(tfdtPayload)
+		if err != nil {
+			continue
+		}
+
+		return ticksToDuration(baseDTS, track.timescale)
+	}
+
+	// No video traf found; try any track.
+	for _, trafPayload := range findBoxes(moofPayload, "traf") {
+		tfhdPayload, ok := findBox(trafPayload, "tfhd")
+		if !ok || len(tfhdPayload) < 8 {
+			continue
+		}
+
+		trackID := binary.BigEndian.Uint32(tfhdPayload[4:8])
+		track := tracksByID[trackID]
+
+		if track == nil {
+			continue
+		}
+
+		tfdtPayload, ok := findBox(trafPayload, "tfdt")
+		if !ok {
+			continue
+		}
+
+		baseDTS, err := parseTfdt(tfdtPayload)
+		if err != nil {
+			continue
+		}
+
+		return ticksToDuration(baseDTS, track.timescale)
+	}
+
+	return 0
+}
+
+// parseSidx parses a sidx box payload (ISO 14496-12 §8.16.3) and returns
+// the subsegment references as SidxEntry values. anchorOffset is the byte
+// position of the first subsegment in the file (typically right after the sidx box).
+func parseSidx(payload []byte, anchorOffset int64) ([]SidxEntry, bool) {
+	if len(payload) < 4 {
+		return nil, false
+	}
+
+	version := payload[0]
+	pos := 4 // skip version + flags
+
+	// reference_ID (4) + timescale (4) = 8 bytes
+	if len(payload) < pos+8 {
+		return nil, false
+	}
+
+	timescale := binary.BigEndian.Uint32(payload[pos+4 : pos+8])
+	pos += 8
+
+	if timescale == 0 {
+		return nil, false
+	}
+
+	var earliestPTS uint64
+
+	if version == 0 {
+		if len(payload) < pos+8 {
+			return nil, false
+		}
+
+		earliestPTS = uint64(binary.BigEndian.Uint32(payload[pos : pos+4]))
+		// first_offset: uint32
+		anchorOffset += int64(binary.BigEndian.Uint32(payload[pos+4 : pos+8]))
+		pos += 8
+	} else {
+		if len(payload) < pos+16 {
+			return nil, false
+		}
+
+		earliestPTS = binary.BigEndian.Uint64(payload[pos : pos+8])
+		anchorOffset += int64(binary.BigEndian.Uint64(payload[pos+8 : pos+16]))
+		pos += 16
+	}
+
+	// reserved (2) + reference_count (2)
+	if len(payload) < pos+4 {
+		return nil, false
+	}
+
+	pos += 2 // reserved
+	refCount := int(binary.BigEndian.Uint16(payload[pos : pos+2]))
+	pos += 2
+
+	// Each reference: 4 + 4 + 4 = 12 bytes
+	if len(payload) < pos+refCount*12 {
+		return nil, false
+	}
+
+	entries := make([]SidxEntry, 0, refCount)
+	curPTS := earliestPTS
+	curOffset := anchorOffset
+
+	for range refCount {
+		word0 := binary.BigEndian.Uint32(payload[pos : pos+4])
+		subDur := binary.BigEndian.Uint32(payload[pos+4 : pos+8])
+		word2 := binary.BigEndian.Uint32(payload[pos+8 : pos+12])
+		pos += 12
+
+		// bit 31 of word0: reference_type (0=media, 1=sidx)
+		refSize := int64(word0 & 0x7FFFFFFF)
+		startsWithSAP := word2&0x80000000 != 0
+
+		entries = append(entries, SidxEntry{
+			PTS:           ticksToDuration(int64(curPTS), timescale),
+			Duration:      ticksToDuration(int64(subDur), timescale),
+			Offset:        curOffset,
+			Size:          refSize,
+			StartsWithSAP: startsWithSAP,
+		})
+
+		curPTS += uint64(subDur)
+		curOffset += refSize
+	}
+
+	return entries, len(entries) > 0
 }
 
 // ── emsg parsing ─────────────────────────────────────────────────────────────

@@ -190,8 +190,9 @@ func (m *SegmentMuxer) WriteTrailer(ctx context.Context, upstreamErr error) erro
 	return nil
 }
 
-// Close flushes remaining data, validates the segment, and calls onClose.
-// Safe to call multiple times; subsequent calls are no-ops.
+// Close flushes remaining data, writes a sidx box for seek support, validates
+// the segment, and calls onClose. Safe to call multiple times; subsequent calls
+// are no-ops.
 func (m *SegmentMuxer) Close() error {
 	if m.closed {
 		return nil
@@ -203,6 +204,9 @@ func (m *SegmentMuxer) Close() error {
 	if err := m.WriteTrailer(context.Background(), nil); err != nil && !errors.Is(err, fmp4.ErrTrailerAlreadyWritten) {
 		return err
 	}
+
+	// Write sidx box at the end of the segment for frame-accurate seek.
+	m.writeSidx()
 
 	err := m.inner.Close()
 
@@ -221,6 +225,35 @@ func (m *SegmentMuxer) Close() error {
 	}
 
 	return err
+}
+
+// writeSidx writes a sidx box to the segment file using the fragment index
+// accumulated by the inner fMP4 muxer. The sidx maps PTS ranges to byte
+// offsets, enabling O(log N) seek within the segment.
+func (m *SegmentMuxer) writeSidx() {
+	fragIndex := m.inner.FragIndex()
+	if len(fragIndex) == 0 {
+		return
+	}
+
+	// Determine the video track's timescale for the sidx box.
+	timescale := uint32(90000) // default
+
+	tw, _ := m.tee.(*teeWriter)
+	if tw != nil {
+		tw.ResetCapture()
+	}
+
+	sidx := fmp4.BuildSidx(fragIndex, timescale)
+	if sidx == nil {
+		return
+	}
+
+	if tw != nil {
+		_, _ = tw.disk.Write(sidx)
+	} else {
+		_, _ = m.writer.Write(sidx)
+	}
 }
 
 // BytesWritten returns the total bytes written to disk so far.

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vtpl1/vrtc-sdk/av"
+	"github.com/vtpl1/vrtc-sdk/av/format/fmp4"
 )
 
 // Compile-time interface check.
@@ -109,6 +110,68 @@ func (c *ChainingDemuxer) Close() error {
 
 		return err
 	}
+
+	return nil
+}
+
+// SeekableSegmentSource extends SegmentSource with the ability to open the
+// segment that contains a given wall-clock timestamp. Implementations that
+// maintain a segment index (e.g. a MemStore with start/end times) should
+// implement this interface to enable seek in ChainingDemuxer.
+type SeekableSegmentSource interface {
+	SegmentSource
+
+	// OpenAt returns a DemuxCloser for the segment containing the given
+	// wall-clock timestamp, and resets the iteration cursor so that
+	// subsequent Next calls continue from the segment after it.
+	// Returns io.EOF if no segment covers the timestamp.
+	OpenAt(ctx context.Context, ts time.Time) (av.DemuxCloser, error)
+}
+
+// Seek repositions the ChainingDemuxer to the segment containing the given
+// wall-clock timestamp and seeks within it to the keyframe at or before seekPTS.
+// seekPTS is the PTS offset within the segment (relative to segment start).
+//
+// The source must implement SeekableSegmentSource; if it does not, Seek returns
+// an error. After Seek, the next ReadPacket returns packets from the target position.
+func (c *ChainingDemuxer) Seek(ctx context.Context, wallTime time.Time, seekPTS time.Duration) error {
+	ss, ok := c.source.(SeekableSegmentSource)
+	if !ok {
+		return errors.New("chain: source does not support seeking")
+	}
+
+	// Close the current demuxer.
+	if c.cur != nil {
+		_ = c.cur.Close()
+		c.cur = nil
+	}
+
+	dmx, err := ss.OpenAt(ctx, wallTime)
+	if err != nil {
+		return err
+	}
+
+	// Read codec headers from the new segment.
+	if _, err := dmx.GetCodecs(ctx); err != nil {
+		_ = dmx.Close()
+
+		return err
+	}
+
+	// Seek within the segment if the demuxer supports it.
+	if seekPTS > 0 {
+		if fd, ok := dmx.(*fmp4.Demuxer); ok {
+			if err := fd.SeekToKeyframe(seekPTS); err != nil {
+				_ = dmx.Close()
+
+				return err
+			}
+		}
+	}
+
+	c.cur = dmx
+	c.dtsOff = 0
+	c.lastEnd = 0
 
 	return nil
 }

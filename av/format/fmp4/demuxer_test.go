@@ -965,3 +965,203 @@ func TestDemuxer_VideoAndAudio_InterleavedDTS(t *testing.T) {
 		t.Error("no audio packets (Idx=1) in output")
 	}
 }
+
+// ── SeekToKeyframe tests ────────────────────────────────────────────────────
+
+func TestDemuxer_SeekToKeyframe_NotSeekable(t *testing.T) {
+	h264 := makeH264Codec(t)
+	streams := []av.Stream{{Idx: 0, Codec: h264}}
+	data := muxToBytes(t, streams, []av.Packet{
+		{Idx: 0, KeyFrame: true, DTS: 0, Duration: 33 * time.Millisecond, Data: avcc(0x01), CodecType: av.H264},
+	})
+
+	// Use a non-seekable reader (plain bytes.NewBuffer, not bytes.NewReader).
+	dmx := fmp4.NewDemuxer(bytes.NewBuffer(data))
+
+	if _, err := dmx.GetCodecs(context.Background()); err != nil {
+		t.Fatalf("GetCodecs: %v", err)
+	}
+
+	err := dmx.SeekToKeyframe(0)
+	if !errors.Is(err, fmp4.ErrNotSeekable) {
+		t.Errorf("want ErrNotSeekable, got %v", err)
+	}
+}
+
+func TestDemuxer_SeekToKeyframe_MoofScan(t *testing.T) {
+	const frameDur = 33 * time.Millisecond
+
+	h264 := makeH264Codec(t)
+	streams := []av.Stream{{Idx: 0, Codec: h264}}
+
+	// Create 6 keyframes → 6 fragments (each keyframe triggers a flush).
+	var pkts []av.Packet
+	for i := range 6 {
+		pkts = append(pkts, av.Packet{
+			Idx:       0,
+			KeyFrame:  true,
+			DTS:       time.Duration(i) * frameDur,
+			Duration:  frameDur,
+			Data:      avcc(byte(i + 1)),
+			CodecType: av.H264,
+		})
+	}
+
+	data := muxToBytes(t, streams, pkts)
+
+	// Use bytes.NewReader (implements io.ReadSeeker).
+	dmx := fmp4.NewDemuxer(bytes.NewReader(data))
+
+	ctx := context.Background()
+	if _, err := dmx.GetCodecs(ctx); err != nil {
+		t.Fatalf("GetCodecs: %v", err)
+	}
+
+	// Seek to a time that falls in the 4th fragment (DTS ≈ 3*33ms = 99ms).
+	target := 3 * frameDur
+	if err := dmx.SeekToKeyframe(target); err != nil {
+		t.Fatalf("SeekToKeyframe: %v", err)
+	}
+
+	// The first packet after seek should have DTS <= target.
+	pkt, err := dmx.ReadPacket(ctx)
+	if err != nil {
+		t.Fatalf("ReadPacket after seek: %v", err)
+	}
+
+	if pkt.DTS > target {
+		t.Errorf("first packet DTS %v > target %v", pkt.DTS, target)
+	}
+
+	if !pkt.KeyFrame {
+		t.Error("first packet after seek should be a keyframe")
+	}
+}
+
+func TestDemuxer_SeekToKeyframe_SeekToStart(t *testing.T) {
+	const frameDur = 33 * time.Millisecond
+
+	h264 := makeH264Codec(t)
+	streams := []av.Stream{{Idx: 0, Codec: h264}}
+
+	pkts := []av.Packet{
+		{Idx: 0, KeyFrame: true, DTS: 0, Duration: frameDur, Data: avcc(0x01), CodecType: av.H264},
+		{Idx: 0, KeyFrame: true, DTS: frameDur, Duration: frameDur, Data: avcc(0x02), CodecType: av.H264},
+	}
+
+	data := muxToBytes(t, streams, pkts)
+	dmx := fmp4.NewDemuxer(bytes.NewReader(data))
+
+	ctx := context.Background()
+	if _, err := dmx.GetCodecs(ctx); err != nil {
+		t.Fatalf("GetCodecs: %v", err)
+	}
+
+	// Read past first packet.
+	if _, err := dmx.ReadPacket(ctx); err != nil {
+		t.Fatalf("ReadPacket: %v", err)
+	}
+
+	// Seek back to the start.
+	if err := dmx.SeekToKeyframe(0); err != nil {
+		t.Fatalf("SeekToKeyframe(0): %v", err)
+	}
+
+	pkt, err := dmx.ReadPacket(ctx)
+	if err != nil {
+		t.Fatalf("ReadPacket after seek: %v", err)
+	}
+
+	if pkt.DTS != 0 {
+		t.Errorf("expected DTS=0 after seeking to start, got %v", pkt.DTS)
+	}
+}
+
+// ── sidx tests ──────────────────────────────────────────────────────────────
+
+func TestMuxer_FragIndex(t *testing.T) {
+	const frameDur = 33 * time.Millisecond
+
+	h264 := makeH264Codec(t)
+	streams := []av.Stream{{Idx: 0, Codec: h264}}
+
+	var buf bytes.Buffer
+	mux := fmp4.NewMuxer(&buf)
+	ctx := context.Background()
+
+	if err := mux.WriteHeader(ctx, streams); err != nil {
+		t.Fatalf("WriteHeader: %v", err)
+	}
+
+	// Write 3 keyframes → 3 fragments (first two flushed on keyframe, last on trailer).
+	for i := range 3 {
+		pkt := av.Packet{
+			Idx:       0,
+			KeyFrame:  true,
+			DTS:       time.Duration(i) * frameDur,
+			Duration:  frameDur,
+			Data:      avcc(byte(i + 1)),
+			CodecType: av.H264,
+		}
+		if err := mux.WritePacket(ctx, pkt); err != nil {
+			t.Fatalf("WritePacket(%d): %v", i, err)
+		}
+	}
+
+	if err := mux.WriteTrailer(ctx, nil); err != nil {
+		t.Fatalf("WriteTrailer: %v", err)
+	}
+
+	idx := mux.FragIndex()
+	if len(idx) < 2 {
+		t.Fatalf("want at least 2 fragment index entries, got %d", len(idx))
+	}
+
+	// First entry should start at PTS 0.
+	if idx[0].PTS != 0 {
+		t.Errorf("first fragment PTS want 0, got %v", idx[0].PTS)
+	}
+
+	// All entries should have positive size.
+	for i, e := range idx {
+		if e.Size <= 0 {
+			t.Errorf("fragment %d: size %d <= 0", i, e.Size)
+		}
+	}
+}
+
+func TestBuildSidx_RoundTrip(t *testing.T) {
+	entries := []fmp4.FragmentIndex{
+		{PTS: 0, Duration: 2 * time.Second, Offset: 100, Size: 5000, StartsWithSAP: true},
+		{PTS: 2 * time.Second, Duration: 2 * time.Second, Offset: 5100, Size: 4800, StartsWithSAP: true},
+		{PTS: 4 * time.Second, Duration: 2 * time.Second, Offset: 9900, Size: 5200, StartsWithSAP: false},
+	}
+
+	sidxData := fmp4.BuildSidx(entries, 90000)
+	if sidxData == nil {
+		t.Fatal("BuildSidx returned nil")
+	}
+
+	// Verify it's a valid box: first 4 bytes = size, next 4 = "sidx".
+	if len(sidxData) < 8 {
+		t.Fatalf("sidx box too small: %d bytes", len(sidxData))
+	}
+
+	size := binary.BigEndian.Uint32(sidxData[0:4])
+	typ := string(sidxData[4:8])
+
+	if typ != "sidx" {
+		t.Errorf("box type want 'sidx', got %q", typ)
+	}
+
+	if int(size) != len(sidxData) {
+		t.Errorf("box size %d != actual %d", size, len(sidxData))
+	}
+}
+
+func TestBuildSidx_Empty(t *testing.T) {
+	sidx := fmp4.BuildSidx(nil, 90000)
+	if sidx != nil {
+		t.Errorf("BuildSidx(nil) should return nil, got %d bytes", len(sidx))
+	}
+}
