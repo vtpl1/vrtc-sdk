@@ -50,19 +50,54 @@ func hasAnnexBStartCode(data []byte) bool {
 
 // IsAnnexBOrAVCC heuristically detects whether data is Annex B, AVCC, or raw.
 // A minimum of 4 bytes is required; shorter slices return NALURaw.
+//
+// Detection order matters: the 4-byte Annex-B start code (00 00 00 01) is
+// unambiguous and checked first. However, the 3-byte start code (00 00 01)
+// collides with valid AVCC length prefixes in the range 256–510: an AVCC
+// NALU of, say, 300 bytes has a 4-byte big-endian prefix of 00 00 01 2C,
+// whose first three bytes match a 3-byte Annex-B start code.
+//
+// Prior code checked hasAnnexBStartCode (which includes the 3-byte pattern)
+// before the AVCC length check, causing AVCC data with NALU sizes 256–510 to
+// be misclassified as Annex-B. The subsequent Annex-B→AVCC re-encoding
+// consumed only 3 bytes of the 4-byte length prefix, leaving the fourth byte
+// (the low byte of the AVCC length) as a spurious payload byte prepended to
+// the NALU. This produced corrupt frames where:
+//   - The junk byte = (nalu_len & 0xFF) − 1
+//   - The forbidden_zero_bit was set (invalid HEVC header)
+//   - The real NAL header (e.g. 02 01 for TRAIL_R) was shifted by one byte
+//
+// Only NALUs sized 256–510 were affected because that is the exact range
+// where the AVCC 4-byte prefix has the form 00 00 01 XX.
+//
+// The fix checks for the unambiguous 4-byte start code first, then tries
+// AVCC (which resolves the 00 00 01 XX ambiguity), and only falls back to
+// the 3-byte Annex-B start code when the AVCC length is implausible.
 func IsAnnexBOrAVCC(data []byte) NALUAvccOrAnnexb {
 	if len(data) < 4 {
 		return NALURaw
 	}
 
-	if hasAnnexBStartCode(data) {
+	// 4-byte Annex-B start code (00 00 00 01) is unambiguous — no valid AVCC
+	// length prefix can equal 0x00000001 (that would be a 1-byte NALU, which
+	// is degenerate and never produced by real encoders).
+	if data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x00 && data[3] == 0x01 {
 		return NALUAnnexb
 	}
-	// Check if the first 4 bytes represent a valid NALU length for AVCC.
-	// The length should be greater than 0 and not exceed the remaining data length.
+
+	// Try AVCC: interpret the first 4 bytes as a big-endian NALU length.
+	// This MUST come before the 3-byte start code check because a valid AVCC
+	// prefix of 00 00 01 XX (NALU sizes 256–510) looks like a 3-byte Annex-B
+	// start code.
 	naluLen := readNALULength(data[:4])
 	if naluLen > 0 && naluLen <= len(data)-4 {
 		return NALUAvcc
+	}
+
+	// 3-byte Annex-B start code (00 00 01) — only reachable when the 4-byte
+	// value is not a plausible AVCC length.
+	if len(data) >= 3 && data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01 {
+		return NALUAnnexb
 	}
 
 	return NALURaw

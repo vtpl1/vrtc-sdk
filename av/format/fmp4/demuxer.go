@@ -80,11 +80,11 @@ type emsgEntry struct {
 // SidxEntry describes one reference in a sidx box: a PTS range mapped to a
 // byte offset and size. Used for O(1) random access within a segment file.
 type SidxEntry struct {
-	PTS      time.Duration // earliest presentation time of this subsegment
-	Duration time.Duration // duration of this subsegment
-	Offset   int64         // byte offset from the start of the first subsegment
-	Size     int64         // byte size of the referenced subsegment (moof+mdat)
-	StartsWithSAP bool    // true if subsegment starts with a stream access point (keyframe)
+	PTS           time.Duration // earliest presentation time of this subsegment
+	Duration      time.Duration // duration of this subsegment
+	Offset        int64         // byte offset from the start of the first subsegment
+	Size          int64         // byte size of the referenced subsegment (moof+mdat)
+	StartsWithSAP bool          // true if subsegment starts with a stream access point (keyframe)
 }
 
 // Demuxer parses a fragmented MP4 byte stream and implements av.DemuxCloser.
@@ -294,6 +294,7 @@ func (d *Demuxer) seekViaMoofScan(rs io.ReadSeeker, target time.Duration) error 
 	d.pr.pos = d.mediaStartPos
 
 	bestPos := d.mediaStartPos // position of the best (closest) moof so far
+
 	var hdr [8]byte
 
 	for {

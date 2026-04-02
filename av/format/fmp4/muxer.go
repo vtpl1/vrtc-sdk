@@ -16,7 +16,6 @@ import (
 	"github.com/vtpl1/vrtc-sdk/av/codec/aacparser"
 	"github.com/vtpl1/vrtc-sdk/av/codec/h264parser"
 	"github.com/vtpl1/vrtc-sdk/av/codec/h265parser"
-	"github.com/vtpl1/vrtc-sdk/av/codec/parser"
 	"github.com/vtpl1/vrtc-sdk/av/codec/pcm"
 )
 
@@ -422,7 +421,9 @@ func makeSample(pkt av.Packet, ts *trackState) sample {
 			flags = sampleFlagsNonKeyframe
 		}
 
-		data = normalizeVideoToAVCC(pkt.Data)
+		// All pipeline demuxers already produce AVCC-framed data; just copy.
+		data = make([]byte, len(pkt.Data))
+		copy(data, pkt.Data)
 	} else {
 		data = make([]byte, len(pkt.Data))
 		copy(data, pkt.Data)
@@ -445,32 +446,6 @@ func makeSample(pkt av.Packet, ts *trackState) sample {
 		extra:              extra,
 		presentationTimeMS: (pkt.DTS + pkt.PTSOffset).Milliseconds(),
 		dts:                dtsToTimescale(pkt.DTS, ts.timescale),
-	}
-}
-
-// normalizeVideoToAVCC ensures H.264/H.265 sample data is in AVCC format
-// (4-byte big-endian length prefix per NALU), as required by ISO 14496-15.
-// All pipeline demuxers already produce AVCC, so this is a defensive pass-through.
-// It handles non-AVCC input (Annex-B, raw NALU) for robustness.
-func normalizeVideoToAVCC(data []byte) []byte {
-	nalus, typ := parser.SplitNALUs(data)
-	switch typ {
-	case parser.NALUAvcc:
-		out := make([]byte, len(data))
-		copy(out, data)
-
-		return out
-	case parser.NALUAnnexb:
-		return h264parser.AnnexBToAVCC(nalus)
-	case parser.NALURaw:
-		fallthrough
-	default:
-		// Raw single NALU — prepend 4-byte BE length.
-		out := make([]byte, 4+len(data))
-		binary.BigEndian.PutUint32(out, uint32(len(data)))
-		copy(out[4:], data)
-
-		return out
 	}
 }
 
@@ -544,8 +519,11 @@ func (m *Muxer) flushFragment() error {
 	fragSize := int64(len(moof) + len(mdat))
 
 	// Compute base PTS and total duration from the first active track.
-	var fragPTS time.Duration
-	var fragDuration time.Duration
+	var (
+		fragPTS      time.Duration
+		fragDuration time.Duration
+	)
+
 	startsWithSAP := false
 
 	for _, ts := range active {
