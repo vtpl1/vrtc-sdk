@@ -116,7 +116,10 @@ func (b *Buffer) evictLocked() {
 	}
 
 	if i > 0 {
-		b.pkts = b.pkts[i:]
+		// Copy to new slice so GC can reclaim evicted packet Data buffers.
+		remaining := make([]av.Packet, len(b.pkts)-i)
+		copy(remaining, b.pkts[i:])
+		b.pkts = remaining
 	}
 }
 

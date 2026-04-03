@@ -36,6 +36,8 @@ type FragmentGap struct {
 	DTSGap      time.Duration `json:"dtsGap"`
 }
 
+const maxFragmentGaps = 100
+
 // trunFlags selects which per-sample fields appear in a trun box.
 const (
 	trunFlagDataOffset      = 0x000001
@@ -230,7 +232,7 @@ func (m *Muxer) WritePacket(_ context.Context, pkt av.Packet) error {
 		// Measure DTS gap at fragment boundary for continuity tracking.
 		if ts.hasVideo && m.lastVideoDTSSet {
 			gap := pkt.DTS - m.lastVideoDTS
-			if gap < 0 || gap > 500*time.Millisecond {
+			if (gap < 0 || gap > 500*time.Millisecond) && len(m.FragmentGaps) < maxFragmentGaps {
 				m.FragmentGaps = append(m.FragmentGaps, FragmentGap{
 					FragmentSeq: int(m.seqNum),
 					DTSGap:      gap,
