@@ -30,6 +30,12 @@ var (
 	ErrHeaderNotWritten = errors.New("fmp4: WriteHeader not called")
 )
 
+// FragmentGap records the DTS discontinuity at a fragment boundary.
+type FragmentGap struct {
+	FragmentSeq int           `json:"fragmentSeq"`
+	DTSGap      time.Duration `json:"dtsGap"`
+}
+
 // trunFlags selects which per-sample fields appear in a trun box.
 const (
 	trunFlagDataOffset      = 0x000001
@@ -108,16 +114,24 @@ type Muxer struct {
 	// bytesWritten tracks the cumulative bytes written to the underlying writer,
 	// used to compute fragment byte offsets for the sidx index.
 	bytesWritten int64
-}
 
-// FragmentIndex records metadata for one flushed moof+mdat fragment,
-// used to build a sidx box for frame-accurate seek.
-type FragmentIndex struct {
-	PTS           time.Duration // base decode time of the fragment
-	Duration      time.Duration // total duration of all samples in the fragment
-	Offset        int64         // byte offset of the moof box from the start of the file
-	Size          int64         // total bytes of the moof+mdat pair
-	StartsWithSAP bool          // true if the first video sample is a keyframe
+	// firstFragmentFlushed is set after the first fragment has been emitted.
+	// Before it is set, the muxer eagerly flushes as soon as a non-keyframe
+	// video packet arrives after the initial keyframe. This ensures that
+	// GOP-cached consumers get their first bytes immediately without waiting
+	// for the next keyframe.
+	firstFragmentFlushed bool
+
+	// lastVideoDTS tracks the DTS of the last video packet written, used
+	// to measure DTS continuity across fragment boundaries.
+	lastVideoDTS    time.Duration
+	lastVideoDTSSet bool
+
+	// FragmentGaps records the DTS gap at each fragment boundary (between
+	// the last video sample of the previous fragment and the first video
+	// sample of the next). Consumers can inspect this after streaming to
+	// verify smooth playback. Empty means perfect continuity.
+	FragmentGaps []FragmentGap
 }
 
 // NewMuxer returns a Muxer that writes fMP4 data to w.
@@ -210,6 +224,19 @@ func (m *Muxer) WritePacket(_ context.Context, pkt av.Packet) error {
 		if err := m.flushFragment(); err != nil {
 			return err
 		}
+
+		m.firstFragmentFlushed = true
+
+		// Measure DTS gap at fragment boundary for continuity tracking.
+		if ts.hasVideo && m.lastVideoDTSSet {
+			gap := pkt.DTS - m.lastVideoDTS
+			if gap < 0 || gap > 500*time.Millisecond {
+				m.FragmentGaps = append(m.FragmentGaps, FragmentGap{
+					FragmentSeq: int(m.seqNum),
+					DTSGap:      gap,
+				})
+			}
+		}
 	}
 
 	newDTS := dtsToTimescale(pkt.DTS, ts.timescale)
@@ -227,8 +254,38 @@ func (m *Muxer) WritePacket(_ context.Context, pkt av.Packet) error {
 
 	ts.samples = append(ts.samples, makeSample(pkt, ts))
 
+	if ts.hasVideo {
+		m.lastVideoDTS = pkt.DTS + m.dtsOffset // store original DTS for gap comparison
+		m.lastVideoDTSSet = true
+	}
+
 	// Audio-only: flush every packet so latency stays low.
 	if !m.hasVideoTracks() {
+		return m.flushFragment()
+	}
+
+	// Eager first-fragment flush: when GOP-cached packets have been written
+	// (we have samples starting from a keyframe) and a non-keyframe video
+	// packet arrives, flush immediately so the consumer gets first bytes
+	// without waiting for the next keyframe.
+	if !m.firstFragmentFlushed && ts.hasVideo && !pkt.KeyFrame && m.hasAnySamples() {
+		m.firstFragmentFlushed = true
+
+		return m.flushFragment()
+	}
+
+	return nil
+}
+
+// Flush forces a fragment flush of any buffered samples without closing the
+// muxer. This is used after GOP injection to emit the cached keyframe and
+// following packets immediately, rather than waiting for the next keyframe.
+func (m *Muxer) Flush() error {
+	if m.closed || !m.written {
+		return nil
+	}
+
+	if m.hasAnySamples() {
 		return m.flushFragment()
 	}
 

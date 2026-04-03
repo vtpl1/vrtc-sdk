@@ -79,6 +79,34 @@ func (b *Buffer) Demuxer(since time.Time) av.DemuxCloser {
 	return &bufDemuxer{buf: b, since: since}
 }
 
+// LastGOP returns a copy of the packets from the last video keyframe onward.
+// Returns nil if no keyframe is buffered. The returned slice is safe to use
+// without holding any lock.
+func (b *Buffer) LastGOP() []av.Packet {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	// Scan backward for the last video keyframe.
+	lastKF := -1
+
+	for i := len(b.pkts) - 1; i >= 0; i-- {
+		if b.pkts[i].KeyFrame && b.pkts[i].CodecType.IsVideo() {
+			lastKF = i
+
+			break
+		}
+	}
+
+	if lastKF < 0 {
+		return nil
+	}
+
+	gop := make([]av.Packet, len(b.pkts)-lastKF)
+	copy(gop, b.pkts[lastKF:])
+
+	return gop
+}
+
 func (b *Buffer) evictLocked() {
 	cutoff := time.Now().Add(-b.maxAge)
 

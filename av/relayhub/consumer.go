@@ -34,6 +34,13 @@ type Consumer struct {
 	headersErr       error
 	headersAvailable chan []av.Stream
 	packets          chan av.Packet
+
+	// skipBefore is set after GOP injection to prevent duplicate delivery.
+	// Packets with DTS strictly less than skipBefore are silently dropped
+	// by handlePacket. Strict less-than allows packets at the exact boundary
+	// DTS to pass (e.g. audio sharing the same DTS as the last video packet).
+	skipBefore    time.Duration
+	skipBeforeSet atomic.Bool
 }
 
 // NewConsumer creates a Consumer for the given consumerID. Start must be called
@@ -143,6 +150,13 @@ func (m *Consumer) WriteCodecChange(_ context.Context, changed []av.Stream) erro
 	m.headers = append([]av.Stream(nil), changed...)
 
 	return nil
+}
+
+// SetSkipBefore marks all packets with DTS <= dts as duplicates of
+// already-injected GOP data. Called by Relay.AddConsumer after GOP injection.
+func (m *Consumer) SetSkipBefore(dts time.Duration) {
+	m.skipBefore = dts
+	m.skipBeforeSet.Store(true)
 }
 
 func (m *Consumer) WritePacket(ctx context.Context, pkt av.Packet) error {
@@ -279,6 +293,14 @@ func (m *Consumer) packetLoop(sctx context.Context, muxer *av.MuxCloser) error {
 }
 
 func (m *Consumer) handlePacket(sctx context.Context, muxer *av.MuxCloser, pkt av.Packet) error {
+	// Skip packets that overlap with the injected GOP to prevent duplicates.
+	// Strict less-than: packets at the exact boundary DTS pass through, which
+	// is correct for audio at the same DTS and harmless for video (the muxer's
+	// duration backfill handles zero-duration samples gracefully).
+	if m.skipBeforeSet.Load() && pkt.DTS < m.skipBefore {
+		return nil
+	}
+
 	if pkt.NewCodecs != nil {
 		if cc, ok := (*muxer).(av.CodecChanger); ok {
 			if err := cc.WriteCodecChange(sctx, pkt.NewCodecs); err != nil {

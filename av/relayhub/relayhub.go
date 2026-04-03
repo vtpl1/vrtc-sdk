@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/vtpl1/vrtc-sdk/av"
+	"github.com/vtpl1/vrtc-sdk/av/packetbuf"
 )
 
 // consumerSeq is a process-wide monotonic counter used to generate unique
@@ -196,6 +197,19 @@ func (m *RelayHub) ListRelayIDs(_ context.Context) []string {
 	m.mu.RUnlock()
 
 	return ids
+}
+
+// PacketBuffer returns the packet buffer for the given relay, or nil if not found.
+func (m *RelayHub) PacketBuffer(sourceID string) *packetbuf.Buffer {
+	m.mu.RLock()
+	p, ok := m.relays[sourceID]
+	m.mu.RUnlock()
+
+	if !ok {
+		return nil
+	}
+
+	return p.PacketBuffer()
 }
 
 // PauseRelay implements av.RelayHub.

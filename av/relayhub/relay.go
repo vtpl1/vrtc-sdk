@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vtpl1/vrtc-sdk/av"
+	"github.com/vtpl1/vrtc-sdk/av/packetbuf"
 )
 
 // Relay manages one demuxer source and fans its decoded packets out to
@@ -33,9 +34,9 @@ type Relay struct {
 	headersErr       error
 	headersAvailable chan struct{}
 
-	// Cached last video keyframe for instant start of late-joining consumers.
-	lastKeyMu    sync.RWMutex
-	lastKeyframe *av.Packet
+	// Packet buffer — stores recent packets for GOP replay on consumer attach
+	// and seamless recorded-to-live playback transition.
+	pktBuf *packetbuf.Buffer
 
 	// metrics — updated from readWriteLoop; read via Stats()
 	packetsRead      atomic.Uint64
@@ -68,6 +69,7 @@ func NewRelay(
 		demuxerRemover:   demuxerRemover,
 		headersAvailable: make(chan struct{}),
 		consumers:        make(map[string]*Consumer),
+		pktBuf:           packetbuf.New(30 * time.Second),
 	}
 
 	return m
@@ -156,6 +158,8 @@ func (m *Relay) Start(ctx context.Context) error {
 		}
 		m.mu.Unlock()
 
+		m.pktBuf.WriteHeader(streams)
+
 		m.wg.Go(func() {
 			m.readWriteLoop(sctx)
 		})
@@ -236,6 +240,11 @@ func (m *Relay) GetCodecs(ctx context.Context) ([]av.Stream, error) {
 // ReadPacket returns the next packet from the underlying demuxer.
 func (m *Relay) ReadPacket(ctx context.Context) (av.Packet, error) {
 	return m.demuxer.ReadPacket(ctx)
+}
+
+// PacketBuffer returns the relay's packet buffer for recorded-to-live playback.
+func (m *Relay) PacketBuffer() *packetbuf.Buffer {
+	return m.pktBuf
 }
 
 // ConsumerCount returns the number of consumers currently registered on this relay.
@@ -344,41 +353,31 @@ func (m *Relay) AddConsumer(
 		return err
 	}
 
-	m.mu.Lock()
+	m.mu.RLock()
 
 	_, existed := m.consumers[consumerID]
 	if existed {
-		m.mu.Unlock()
+		m.mu.RUnlock()
 
 		return ErrConsumerAlreadyExists
 	}
 
-	c := NewConsumer(consumerID, muxerFactory, muxerRemover, errChan)
-	m.consumers[consumerID] = c
-	m.mu.Unlock()
-
-	streams, err := m.GetCodecs(ctx)
-	if err != nil {
-		m.mu.Lock()
-		delete(m.consumers, consumerID)
-		m.mu.Unlock()
-		c.setLastError(errors.Join(ErrCodecsNotAvailable, err))
-
-		return err
-	}
-
-	// Start the consumer directly using the producer's stored context.
-	// If the producer is closing (sctx already cancelled or alreadyClosing set),
-	// Consumer.Start detects this and returns an error without spawning a goroutine.
-	m.mu.RLock()
 	sctx := m.sctx
 	m.mu.RUnlock()
 
+	if sctx == nil {
+		return ErrRelayNotStartedYet
+	}
+
+	streams, err := m.GetCodecs(ctx)
+	if err != nil {
+		return errors.Join(ErrCodecsNotAvailable, err)
+	}
+
+	c := NewConsumer(consumerID, muxerFactory, muxerRemover, errChan)
+
 	if err := c.Start(sctx); err != nil { //nolint:contextcheck
 		c.inactive.Store(true)
-		m.mu.Lock()
-		delete(m.consumers, consumerID)
-		m.mu.Unlock()
 
 		return ErrRelayClosing
 	}
@@ -387,14 +386,43 @@ func (m *Relay) AddConsumer(
 		return err
 	}
 
-	// Send cached keyframe for instant start of late-joining consumers.
-	m.lastKeyMu.RLock()
-	cached := m.lastKeyframe
-	m.lastKeyMu.RUnlock()
-
-	if cached != nil {
-		_ = c.WritePacket(ctx, *cached)
+	// Inject cached GOP so the consumer starts with a keyframe immediately
+	// instead of waiting for the next one on the live stream.
+	// This happens BEFORE the consumer is visible to readWriteLoop, ensuring
+	// GOP packets are ordered before any live packets.
+	gop := m.pktBuf.LastGOP()
+	for _, pkt := range gop {
+		_ = c.WritePacket(ctx, pkt)
 	}
+
+	// Mark the last injected DTS so the consumer skips any overlapping live
+	// packets that readWriteLoop delivers after the consumer becomes visible.
+	if len(gop) > 0 {
+		c.SetSkipBefore(gop[len(gop)-1].DTS)
+	}
+
+	// Now make the consumer visible to readWriteLoop for live packet delivery.
+	// Re-check closing state and duplicates under write lock.
+	m.mu.Lock()
+
+	if m.alreadyClosing.Load() {
+		m.mu.Unlock()
+
+		_ = c.Close()
+
+		return ErrRelayClosing
+	}
+
+	if _, dup := m.consumers[consumerID]; dup {
+		m.mu.Unlock()
+
+		_ = c.Close()
+
+		return ErrConsumerAlreadyExists
+	}
+
+	m.consumers[consumerID] = c
+	m.mu.Unlock()
 
 	return nil
 }
@@ -475,14 +503,6 @@ func (m *Relay) readWriteLoop(ctx context.Context) {
 
 			if pkt.KeyFrame {
 				m.keyFrames.Add(1)
-
-				if pkt.CodecType.IsVideo() {
-					cached := pkt
-
-					m.lastKeyMu.Lock()
-					m.lastKeyframe = &cached
-					m.lastKeyMu.Unlock()
-				}
 			}
 
 			m.lastPacketAtNs.Store(time.Now().UnixNano())
@@ -491,7 +511,11 @@ func (m *Relay) readWriteLoop(ctx context.Context) {
 				m.mu.Lock()
 				m.headers = cloneStreamHeaders(pkt.NewCodecs)
 				m.mu.Unlock()
+
+				m.pktBuf.WriteHeader(pkt.NewCodecs)
 			}
+
+			m.pktBuf.WritePacket(pkt)
 
 			m.mu.RLock()
 
