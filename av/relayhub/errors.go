@@ -69,4 +69,9 @@ var (
 	// should close this muxer and open a new one via the MuxerFactory.
 	// The packet that triggered the rotation is re-delivered to the new muxer.
 	ErrMuxerRotate = errors.New("muxer rotate")
+
+	// ErrMaxConsumersReached is returned by AddConsumer when the relay's
+	// maximum consumer limit has been reached. This is used to enforce
+	// single-consumer isolation on recorded playback relays.
+	ErrMaxConsumersReached = errors.New("relay: maximum consumer count reached")
 )

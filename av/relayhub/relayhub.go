@@ -23,6 +23,16 @@ import (
 // consumer IDs when the caller does not supply one.
 var consumerSeq atomic.Uint64 //nolint:gochecknoglobals
 
+// RelayOption configures optional behaviour for relays created by a hub.
+type RelayOption func(*Relay)
+
+// WithMaxConsumers limits the number of consumers per relay. When the limit
+// is reached, Consume returns ErrMaxConsumersReached. Use 1 for recorded
+// playback hubs to enforce single-consumer isolation.
+func WithMaxConsumers(n int) RelayOption {
+	return func(r *Relay) { r.maxConsumers = n }
+}
+
 // RelayHub is the concrete implementation of av.RelayHub. Use New to create one.
 type RelayHub struct {
 	demuxerFactory av.DemuxerFactory
@@ -34,6 +44,7 @@ type RelayHub struct {
 	alreadyClosing atomic.Bool
 	started        atomic.Bool
 	relays         map[string]*Relay
+	relayOpts      []RelayOption
 
 	relaysToStart chan *Relay
 }
@@ -46,15 +57,18 @@ type consumerHandle struct {
 }
 
 // New creates a RelayHub backed by the given demuxer factory and optional
-// remover. Call Start before attaching consumers via Consume.
+// remover. Call Start before attaching consumers via Consume. RelayOptions
+// are applied to every relay created by this hub.
 func New(
 	demuxerFactory av.DemuxerFactory,
 	demuxerRemover av.DemuxerRemover,
+	opts ...RelayOption,
 ) *RelayHub {
 	m := &RelayHub{
 		demuxerFactory: demuxerFactory,
 		demuxerRemover: demuxerRemover,
 		relays:         make(map[string]*Relay),
+		relayOpts:      opts,
 		relaysToStart:  make(chan *Relay, 10),
 	}
 
@@ -102,6 +116,11 @@ func (m *RelayHub) Consume(
 		p, existed := m.relays[sourceID]
 		if !existed {
 			p = NewRelay(sourceID, m.demuxerFactory, m.demuxerRemover)
+
+			for _, opt := range m.relayOpts {
+				opt(p)
+			}
+
 			m.relays[sourceID] = p
 		}
 		m.mu.Unlock()

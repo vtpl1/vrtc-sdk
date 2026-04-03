@@ -38,6 +38,11 @@ type Relay struct {
 	// and seamless recorded-to-live playback transition.
 	pktBuf *packetbuf.Buffer
 
+	// maxConsumers limits the number of consumers on this relay. 0 means
+	// unlimited. Used to enforce single-consumer isolation on recorded
+	// playback relays so that leaky delivery mode is never triggered.
+	maxConsumers int
+
 	// metrics — updated from readWriteLoop; read via Stats()
 	packetsRead      atomic.Uint64
 	videoPacketsRead atomic.Uint64
@@ -355,6 +360,12 @@ func (m *Relay) AddConsumer(
 	}
 
 	m.mu.RLock()
+
+	if m.maxConsumers > 0 && len(m.consumers) >= m.maxConsumers {
+		m.mu.RUnlock()
+
+		return ErrMaxConsumersReached
+	}
 
 	_, existed := m.consumers[consumerID]
 	if existed {
