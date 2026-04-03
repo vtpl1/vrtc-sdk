@@ -1137,7 +1137,7 @@ func TestBuildSidx_RoundTrip(t *testing.T) {
 		{PTS: 4 * time.Second, Duration: 2 * time.Second, Offset: 9900, Size: 5200, StartsWithSAP: false},
 	}
 
-	sidxData := fmp4.BuildSidx(entries, 90000)
+	sidxData := fmp4.BuildSidx(entries, 1, 90000, 0)
 	if sidxData == nil {
 		t.Fatal("BuildSidx returned nil")
 	}
@@ -1159,8 +1159,47 @@ func TestBuildSidx_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestBuildSidx_WithEmsgGaps verifies that BuildSidx produces correct offsets
+// when fragments are non-contiguous (e.g. emsg boxes between them). parseSidx
+// must reconstruct the original absolute offsets.
+func TestBuildSidx_WithEmsgGaps(t *testing.T) {
+	// Simulate 3 fragments where emsg boxes create gaps between them.
+	// anchor=100, entries have non-contiguous offsets:
+	//   frag0 at 120 (gap of 20 from anchor → emsg before first fragment)
+	//   frag1 at 5200 (gap of 80 after frag0's 5000 bytes → emsg before second)
+	//   frag2 at 10100 (gap of 100 after frag1's 4800 → emsg before third)
+	anchor := int64(100)
+	entries := []fmp4.FragmentIndex{
+		{PTS: 0, Duration: 2 * time.Second, Offset: 120, Size: 5000, StartsWithSAP: true},
+		{PTS: 2 * time.Second, Duration: 2 * time.Second, Offset: 5200, Size: 4800, StartsWithSAP: true},
+		{PTS: 4 * time.Second, Duration: 2 * time.Second, Offset: 10100, Size: 5200, StartsWithSAP: false},
+	}
+
+	sidxData := fmp4.BuildSidx(entries, 1, 90000, anchor)
+	if sidxData == nil {
+		t.Fatal("BuildSidx returned nil")
+	}
+
+	// Parse it back — parseSidx uses anchor as the base offset.
+	payload := sidxData[8:] // skip 8-byte box header; ParseSidx reads version+flags itself
+	parsed, ok := fmp4.ParseSidx(payload, anchor)
+	if !ok {
+		t.Fatal("parseSidx failed")
+	}
+
+	if len(parsed) != len(entries) {
+		t.Fatalf("want %d entries, got %d", len(entries), len(parsed))
+	}
+
+	for i, got := range parsed {
+		if got.Offset != entries[i].Offset {
+			t.Errorf("entry[%d] offset: want %d, got %d", i, entries[i].Offset, got.Offset)
+		}
+	}
+}
+
 func TestBuildSidx_Empty(t *testing.T) {
-	sidx := fmp4.BuildSidx(nil, 90000)
+	sidx := fmp4.BuildSidx(nil, 1, 90000, 0)
 	if sidx != nil {
 		t.Errorf("BuildSidx(nil) should return nil, got %d bytes", len(sidx))
 	}
@@ -1190,7 +1229,14 @@ func muxToBytesWithSidx(t *testing.T, streams []av.Stream, pkts []av.Packet) []b
 	}
 
 	fragIndex := mux.FragIndex()
-	sidx := fmp4.BuildSidx(fragIndex, 90000)
+
+	trackID, timescale, ok := mux.VideoTrackInfo()
+	if !ok {
+		trackID = 1
+		timescale = 90000
+	}
+
+	sidx := fmp4.BuildSidx(fragIndex, trackID, timescale, mux.MediaStartPos())
 	buf.Write(sidx)
 
 	return buf.Bytes()

@@ -252,6 +252,71 @@ func TestBuffer_EvictionDoesNotSkipPackets(t *testing.T) {
 	}
 }
 
+// TestBuffer_DemuxerFutureStartSkipsEarlyPackets verifies that a demuxer
+// created for a future wall-clock time does not yield packets whose
+// WallClockTime is before since, even after the startup scan completes.
+func TestBuffer_DemuxerFutureStartSkipsEarlyPackets(t *testing.T) {
+	t.Parallel()
+
+	buf := packetbuf.New(10 * time.Second)
+	defer buf.Close()
+
+	buf.WriteHeader(makeTestStreams())
+
+	now := time.Now()
+
+	// Create demuxer with a future start time.
+	since := now.Add(500 * time.Millisecond)
+	dmx := buf.Demuxer(since)
+	defer func() { _ = dmx.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Write packets spanning before and after the since threshold.
+	var wg sync.WaitGroup
+
+	wg.Go(func() {
+		times := []time.Duration{0, 250, 500, 750}
+		for i, ms := range times {
+			buf.WritePacket(av.Packet{
+				KeyFrame:      true,
+				Idx:           0,
+				CodecType:     av.H264,
+				Data:          []byte{byte(i)},
+				WallClockTime: now.Add(time.Duration(ms) * time.Millisecond),
+				DTS:           time.Duration(ms) * time.Millisecond,
+			})
+
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		buf.Close()
+	})
+
+	var received []byte
+
+	for {
+		pkt, err := dmx.ReadPacket(ctx)
+		if err != nil {
+			break
+		}
+
+		received = append(received, pkt.Data[0])
+	}
+
+	wg.Wait()
+
+	// Only packets at 500ms and 750ms should be delivered (data bytes 2, 3).
+	if len(received) != 2 {
+		t.Fatalf("expected 2 packets, got %d: %v", len(received), received)
+	}
+
+	if received[0] != 2 || received[1] != 3 {
+		t.Errorf("expected data [2 3], got %v", received)
+	}
+}
+
 func TestBuffer_GetCodecsEmpty(t *testing.T) {
 	t.Parallel()
 

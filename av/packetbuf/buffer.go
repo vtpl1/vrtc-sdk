@@ -26,7 +26,7 @@ type Buffer struct {
 	maxAge     time.Duration
 	closed     atomic.Bool
 	notify     chan struct{} // replaced on each push
-	baseOffset int64        // total packets evicted; converts absolute cursor → slice index
+	baseOffset int64         // total packets evicted; converts absolute cursor → slice index
 }
 
 // New creates a Buffer that retains packets for at most maxAge.
@@ -184,6 +184,14 @@ func (d *bufDemuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 		if rel < len(pkts) {
 			pkt := pkts[rel]
 			d.cursor++
+
+			// Skip packets whose wall-clock time is still before the
+			// requested start. This covers the future-start case where
+			// the startup scan found no matches but new packets arrive
+			// before the target time.
+			if pkt.WallClockTime.Before(d.since) {
+				continue
+			}
 
 			return pkt, nil
 		}

@@ -245,15 +245,18 @@ func (m *SegmentMuxer) writeSidx() {
 		return
 	}
 
-	// Determine the video track's timescale for the sidx box.
-	timescale := uint32(90000) // default
+	trackID, timescale, ok := m.inner.VideoTrackInfo()
+	if !ok {
+		trackID = 1
+		timescale = 90000
+	}
 
 	tw, _ := m.tee.(*teeWriter)
 	if tw != nil {
 		tw.ResetCapture()
 	}
 
-	sidx := fmp4.BuildSidx(fragIndex, timescale)
+	sidx := fmp4.BuildSidx(fragIndex, trackID, timescale, m.inner.MediaStartPos())
 	if sidx == nil {
 		return
 	}

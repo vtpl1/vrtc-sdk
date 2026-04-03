@@ -117,6 +117,10 @@ type Muxer struct {
 	// used to compute fragment byte offsets for the sidx index.
 	bytesWritten int64
 
+	// mediaStartPos is the byte offset immediately after the init segment
+	// (ftyp + moov). Used as the sidx anchor offset.
+	mediaStartPos int64
+
 	// firstFragmentFlushed is set after the first fragment has been emitted.
 	// Before it is set, the muxer eagerly flushes as soon as a non-keyframe
 	// video packet arrives after the initial keyframe. This ensures that
@@ -188,6 +192,7 @@ func (m *Muxer) WriteHeader(_ context.Context, streams []av.Stream) error {
 	}
 
 	m.bytesWritten += int64(len(init))
+	m.mediaStartPos = m.bytesWritten
 	m.written = true
 	m.waitingForKeyframe = m.hasVideoTracks()
 
@@ -395,33 +400,63 @@ func (m *Muxer) FragIndex() []FragmentIndex {
 	return m.fragIndex
 }
 
+// MediaStartPos returns the byte offset immediately after the init segment
+// (ftyp + moov). This is the anchor offset for the sidx box.
+func (m *Muxer) MediaStartPos() int64 {
+	return m.mediaStartPos
+}
+
+// VideoTrackInfo returns the MP4 track ID and timescale of the first video
+// track, or ok=false if the muxer has no video tracks.
+func (m *Muxer) VideoTrackInfo() (trackID uint32, timescale uint32, ok bool) {
+	for _, ts := range m.tracks {
+		if ts.hasVideo {
+			return ts.id, ts.timescale, true
+		}
+	}
+
+	return 0, 0, false
+}
+
 // BuildSidx builds a sidx box (ISO 14496-12 §8.16.3) from the given fragment
-// index entries. The sidx box maps PTS ranges to byte offsets for O(1) seek.
-// trackTimescale is the timescale of the reference track (typically the video track).
-func BuildSidx(entries []FragmentIndex, trackTimescale uint32) []byte {
+// index entries. referenceID is the MP4 track ID of the reference track.
+// trackTimescale is that track's timescale. anchorOffset is the byte position
+// immediately after the init segment (mediaStartPos), which the demuxer uses
+// as the base for offset reconstruction.
+func BuildSidx(
+	entries []FragmentIndex,
+	referenceID, trackTimescale uint32,
+	anchorOffset int64,
+) []byte {
 	if len(entries) == 0 {
 		return nil
 	}
 
-	// Reference ID = 1 (first track).
 	var p bytes.Buffer
 
 	// reference_ID (4)
-	writeUint32(&p, 1)
+	writeUint32(&p, referenceID)
 	// timescale (4)
 	writeUint32(&p, trackTimescale)
 	// earliest_presentation_time (8, version=1) — use first entry's PTS
 	writeUint64(&p, uint64(dtsToTimescale(entries[0].PTS, trackTimescale)))
-	// first_offset (8, version=1) — 0, offsets in entries are absolute
-	writeUint64(&p, 0)
+	// first_offset (8, version=1) — distance from anchor to first subsegment
+	writeUint64(&p, uint64(entries[0].Offset-anchorOffset))
 	// reserved (2) + reference_count (2)
 	writeUint16(&p, 0)
 	writeUint16(&p, uint16(len(entries)))
 
-	for _, e := range entries {
-		// referenced_size (31 bits), reference_type=0 (1 bit, MSB)
-		refSize := uint32(e.Size) & 0x7FFFFFFF
-		writeUint32(&p, refSize)
+	for i, e := range entries {
+		// referenced_size: the byte span from this subsegment's start to the
+		// next one's start. For the last entry, use its moof+mdat size.
+		var refSize int64
+		if i+1 < len(entries) {
+			refSize = entries[i+1].Offset - e.Offset
+		} else {
+			refSize = e.Size
+		}
+
+		writeUint32(&p, uint32(refSize)&0x7FFFFFFF)
 		// subsegment_duration
 		writeUint32(&p, uint32(dtsToTimescale(e.Duration, trackTimescale)))
 		// starts_with_SAP (1 bit) + SAP_type (3 bits) + SAP_delta_time (28 bits)
@@ -676,9 +711,11 @@ func buildInitSegment(tracks []*trackState) []byte {
 // video codec present in tracks.
 func buildFtyp(tracks []*trackState) []byte {
 	codecBrand := "avc1" // default for H.264
+
 	for _, ts := range tracks {
 		if _, ok := ts.codec.(h265parser.CodecData); ok {
 			codecBrand = "hev1"
+
 			break
 		}
 	}

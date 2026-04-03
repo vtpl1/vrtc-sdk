@@ -164,6 +164,23 @@ func (m *Consumer) SetSkipBefore(dts time.Duration) {
 	m.skipBeforeSet.Store(true)
 }
 
+// NeedsKeyframeRecovery reports whether pkt should be skipped because the
+// consumer is waiting to resync on a keyframe after a dropped packet. If pkt
+// is a keyframe the recovery flag is cleared.
+func (m *Consumer) NeedsKeyframeRecovery(pkt av.Packet) bool {
+	if !m.needsKeyframe.Load() {
+		return false
+	}
+
+	if !pkt.KeyFrame {
+		return true
+	}
+
+	m.needsKeyframe.Store(false)
+
+	return false
+}
+
 // ShouldSkip reports whether pkt overlaps with previously injected GOP data
 // and should not be enqueued. Once a packet passes the threshold the check is
 // permanently disabled (DTS is monotonically non-decreasing).

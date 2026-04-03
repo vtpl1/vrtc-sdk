@@ -204,7 +204,7 @@ func (d *Demuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 			}
 
 		case "sidx":
-			if entries, ok := parseSidx(payload, d.mediaStartPos); ok {
+			if entries, ok := ParseSidx(payload, d.mediaStartPos); ok {
 				d.sidx = entries
 			}
 
@@ -390,7 +390,7 @@ func (d *Demuxer) loadSidx(rs io.ReadSeeker) {
 				break
 			}
 
-			if entries, ok := parseSidx(payload, d.mediaStartPos); ok {
+			if entries, ok := ParseSidx(payload, d.mediaStartPos); ok {
 				d.sidx = entries
 			}
 
@@ -472,10 +472,10 @@ func moofBaseTime(moofPayload []byte, tracksByID map[uint32]*trackDef) time.Dura
 	return 0
 }
 
-// parseSidx parses a sidx box payload (ISO 14496-12 §8.16.3) and returns
-// the subsegment references as SidxEntry values. anchorOffset is the byte
-// position of the first subsegment in the file (typically right after the sidx box).
-func parseSidx(payload []byte, anchorOffset int64) ([]SidxEntry, bool) {
+// ParseSidx parses a sidx box payload (ISO 14496-12 §8.16.3) and returns the
+// subsegment references as SidxEntry values. anchorOffset is the byte position
+// of the media start (typically right after the init segment).
+func ParseSidx(payload []byte, anchorOffset int64) ([]SidxEntry, bool) {
 	if len(payload) < 4 {
 		return nil, false
 	}
