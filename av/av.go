@@ -118,6 +118,11 @@ func (s CodecType) String() string {
 	return ""
 }
 
+// MarshalJSON encodes CodecType as its human-readable name.
+func (s CodecType) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + s.String() + `"`), nil
+}
+
 // IsAudio reports whether the codec type represents an audio codec.
 func (s CodecType) IsAudio() bool {
 	return s&codecTypeAudioBit != 0

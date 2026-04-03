@@ -105,6 +105,17 @@ type RelayHub interface {
 	// GetRelayStats returns a point-in-time snapshot of all active relays.
 	GetRelayStats(ctx context.Context) []RelayStats
 
+	// GetRelayStatsByID returns the stats for a single relay identified by
+	// sourceID. Returns the stats and true if the relay exists, or a zero
+	// value and false if not. This is O(1) — a single map lookup plus the
+	// Stats() call on that relay — so prefer it over GetRelayStats when
+	// only one relay's metrics are needed.
+	GetRelayStatsByID(ctx context.Context, sourceID string) (RelayStats, bool)
+
+	// ListRelayIDs returns the sourceIDs of all active relays. This is a
+	// lightweight O(n) key-only scan — no per-relay Stats() is computed.
+	ListRelayIDs(ctx context.Context) []string
+
 	// GetActiveRelayCount returns the number of relays currently managed
 	// by this RelayHub. A relay is considered active from the moment its
 	// first consumer is registered until all its consumers have been removed and

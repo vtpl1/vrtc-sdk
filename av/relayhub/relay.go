@@ -38,12 +38,13 @@ type Relay struct {
 	lastKeyframe *av.Packet
 
 	// metrics — updated from readWriteLoop; read via Stats()
-	packetsRead    atomic.Uint64
-	bytesRead      atomic.Uint64
-	keyFrames      atomic.Uint64
-	droppedPackets atomic.Uint64
-	lastPacketAtNs atomic.Int64 // unix nanoseconds; 0 = no packet yet
-	startedAt      time.Time    // set once in Start; zero until Start is called
+	packetsRead      atomic.Uint64
+	videoPacketsRead atomic.Uint64
+	bytesRead        atomic.Uint64
+	keyFrames        atomic.Uint64
+	droppedPackets   atomic.Uint64
+	lastPacketAtNs   atomic.Int64 // unix nanoseconds; 0 = no packet yet
+	startedAt        time.Time    // set once in Start; zero until Start is called
 }
 
 func cloneStreamHeaders(streams []av.Stream) []av.Stream {
@@ -284,8 +285,9 @@ func (m *Relay) Stats() av.RelayStats {
 		streams = append(streams, si)
 	}
 
-	// Compute average FPS and bitrate from counters.
+	// Compute average FPS (video only) and bitrate from counters.
 	packetsRead := m.packetsRead.Load()
+	videoPacketsRead := m.videoPacketsRead.Load()
 	bytesRead := m.bytesRead.Load()
 
 	var actualFPS, bitrateBps float64
@@ -293,7 +295,7 @@ func (m *Relay) Stats() av.RelayStats {
 	if !startedAt.IsZero() {
 		elapsed := time.Since(startedAt).Seconds()
 		if elapsed > 0 {
-			actualFPS = float64(packetsRead) / elapsed
+			actualFPS = float64(videoPacketsRead) / elapsed
 			bitrateBps = float64(bytesRead) * 8 / elapsed
 		}
 	}
@@ -466,6 +468,10 @@ func (m *Relay) readWriteLoop(ctx context.Context) {
 
 			m.packetsRead.Add(1)
 			m.bytesRead.Add(uint64(len(pkt.Data)))
+
+			if pkt.CodecType.IsVideo() {
+				m.videoPacketsRead.Add(1)
+			}
 
 			if pkt.KeyFrame {
 				m.keyFrames.Add(1)

@@ -171,6 +171,33 @@ func (m *RelayHub) GetRelayStats(_ context.Context) []av.RelayStats {
 	return stats
 }
 
+// GetRelayStatsByID implements av.RelayHub.
+func (m *RelayHub) GetRelayStatsByID(_ context.Context, sourceID string) (av.RelayStats, bool) {
+	m.mu.RLock()
+	p, ok := m.relays[sourceID]
+	m.mu.RUnlock()
+
+	if !ok {
+		return av.RelayStats{}, false
+	}
+
+	return p.Stats(), true
+}
+
+// ListRelayIDs implements av.RelayHub.
+func (m *RelayHub) ListRelayIDs(_ context.Context) []string {
+	m.mu.RLock()
+	ids := make([]string, 0, len(m.relays))
+
+	for id := range m.relays {
+		ids = append(ids, id)
+	}
+
+	m.mu.RUnlock()
+
+	return ids
+}
+
 // PauseRelay implements av.RelayHub.
 func (m *RelayHub) PauseRelay(ctx context.Context, sourceID string) error {
 	m.mu.RLock()

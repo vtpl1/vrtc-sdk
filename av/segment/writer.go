@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 )
 
@@ -63,6 +64,10 @@ func NewAdaptiveWriter(
 ) (*AdaptiveWriter, error) {
 	if profile == ProfileAuto {
 		profile = DetectProfile(path)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return nil, fmt.Errorf("segment: create directory for %q: %w", path, err)
 	}
 
 	f, err := os.Create(path)
