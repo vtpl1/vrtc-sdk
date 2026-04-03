@@ -184,6 +184,74 @@ func TestBuffer_WallClockAutoSet(t *testing.T) {
 	}
 }
 
+// TestBuffer_EvictionDoesNotSkipPackets verifies that a slow demuxer reader
+// does not silently skip packets when evictLocked rebuilds the underlying
+// slice. The reader's cursor must stay in sync with the buffer's baseOffset.
+func TestBuffer_EvictionDoesNotSkipPackets(t *testing.T) {
+	t.Parallel()
+
+	// Short maxAge so eviction kicks in quickly.
+	buf := packetbuf.New(200 * time.Millisecond)
+	defer buf.Close()
+
+	buf.WriteHeader(makeTestStreams())
+
+	// Start a demuxer before any packets exist so it follows from the start.
+	dmx := buf.Demuxer(time.Time{})
+	defer func() { _ = dmx.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	const totalPackets = 100
+
+	// Writer goroutine: writes 100 packets spaced 10ms apart.
+	// With maxAge=200ms, roughly 20 packets fit before eviction starts —
+	// so the reader MUST survive many eviction cycles.
+	var wg sync.WaitGroup
+
+	wg.Go(func() {
+		for i := range totalPackets {
+			buf.WritePacket(av.Packet{
+				KeyFrame:      true,
+				Idx:           0,
+				CodecType:     av.H264,
+				Data:          []byte{byte(i)},
+				WallClockTime: time.Now(),
+				DTS:           time.Duration(i) * 10 * time.Millisecond,
+			})
+
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		buf.Close()
+	})
+
+	// Reader: read all packets and verify none are skipped.
+	var received []byte
+
+	for {
+		pkt, err := dmx.ReadPacket(ctx)
+		if err != nil {
+			break
+		}
+
+		received = append(received, pkt.Data[0])
+	}
+
+	wg.Wait()
+
+	if len(received) != totalPackets {
+		t.Fatalf("expected %d packets, got %d", totalPackets, len(received))
+	}
+
+	for i, b := range received {
+		if b != byte(i) {
+			t.Fatalf("packet[%d]: expected data=%d, got %d (skipped by eviction)", i, i, b)
+		}
+	}
+}
+
 func TestBuffer_GetCodecsEmpty(t *testing.T) {
 	t.Parallel()
 

@@ -20,12 +20,13 @@ import (
 // Read side:  call Demuxer(since) to get a DemuxCloser that replays
 // buffered packets from the given wall-clock time, then follows live.
 type Buffer struct {
-	mu      sync.RWMutex
-	streams []av.Stream
-	pkts    []av.Packet
-	maxAge  time.Duration
-	closed  atomic.Bool
-	notify  chan struct{} // replaced on each push
+	mu         sync.RWMutex
+	streams    []av.Stream
+	pkts       []av.Packet
+	maxAge     time.Duration
+	closed     atomic.Bool
+	notify     chan struct{} // replaced on each push
+	baseOffset int64        // total packets evicted; converts absolute cursor → slice index
 }
 
 // New creates a Buffer that retains packets for at most maxAge.
@@ -120,6 +121,7 @@ func (b *Buffer) evictLocked() {
 		remaining := make([]av.Packet, len(b.pkts)-i)
 		copy(remaining, b.pkts[i:])
 		b.pkts = remaining
+		b.baseOffset += int64(i)
 	}
 }
 
@@ -128,7 +130,7 @@ func (b *Buffer) evictLocked() {
 type bufDemuxer struct {
 	buf     *Buffer
 	since   time.Time
-	cursor  int // index into snapshot; -1 = not started
+	cursor  int64 // absolute offset into the virtual packet stream
 	started bool
 	done    atomic.Bool
 }
@@ -152,22 +154,35 @@ func (d *bufDemuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 	for {
 		d.buf.mu.RLock()
 		pkts := d.buf.pkts
+		base := d.buf.baseOffset
 		notify := d.buf.notify
 		closed := d.buf.closed.Load()
 		d.buf.mu.RUnlock()
 
 		if !d.started {
 			// Find first packet >= since.
-			d.cursor = 0
-			for d.cursor < len(pkts) && pkts[d.cursor].WallClockTime.Before(d.since) {
+			d.cursor = base
+
+			for rel := d.cursor - base; rel < int64(len(pkts)); rel++ {
+				if !pkts[rel].WallClockTime.Before(d.since) {
+					break
+				}
+
 				d.cursor++
 			}
 
 			d.started = true
 		}
 
-		if d.cursor < len(pkts) {
-			pkt := pkts[d.cursor]
+		// If the cursor fell behind due to eviction, advance to the
+		// earliest packet still in the buffer.
+		if d.cursor < base {
+			d.cursor = base
+		}
+
+		rel := int(d.cursor - base)
+		if rel < len(pkts) {
+			pkt := pkts[rel]
 			d.cursor++
 
 			return pkt, nil
