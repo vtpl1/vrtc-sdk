@@ -136,6 +136,16 @@ type Muxer struct {
 	FragmentGaps []FragmentGap
 }
 
+// FragmentIndex records metadata for one flushed moof+mdat fragment,
+// used to build a sidx box for frame-accurate seek.
+type FragmentIndex struct {
+	PTS           time.Duration // base decode time of the fragment
+	Duration      time.Duration // total duration of all samples in the fragment
+	Offset        int64         // byte offset of the moof box from the start of the file
+	Size          int64         // total bytes of the moof+mdat pair
+	StartsWithSAP bool          // true if the first video sample is a keyframe
+}
+
 // NewMuxer returns a Muxer that writes fMP4 data to w.
 func NewMuxer(w io.Writer) *Muxer {
 	return &Muxer{
