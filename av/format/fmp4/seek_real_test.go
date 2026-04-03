@@ -53,8 +53,14 @@ func detectVideoCodec(streams []av.Stream) videoCodec {
 	return codecUnknown
 }
 
-// findFmp4Files returns all .fmp4 files under the recordings directory,
-// skipping incomplete (no end-time) segments.
+// maxTestFiles caps the number of recording files used in a single test run.
+// The recordings directory can contain hundreds of large files; testing all of
+// them is prohibitively slow under -race. Files are shuffled before capping so
+// that repeated runs still exercise different recordings.
+const maxTestFiles = 10
+
+// findFmp4Files returns up to maxTestFiles .fmp4 files under the recordings
+// directory, skipping incomplete (no end-time) segments.
 func findFmp4Files(t *testing.T) []string {
 	t.Helper()
 
@@ -95,11 +101,19 @@ func findFmp4Files(t *testing.T) []string {
 		t.Skipf("no completed .fmp4 files found in %s", realRecordingsDir)
 	}
 
+	// Shuffle and cap to avoid spending minutes on hundreds of large files.
+	rand.Shuffle(len(files), func(i, j int) { files[i], files[j] = files[j], files[i] })
+
+	if len(files) > maxTestFiles {
+		files = files[:maxTestFiles]
+	}
+
 	return files
 }
 
-// fileDuration opens an fMP4, reads all packets, and returns the total duration
-// (last DTS + last Duration) and the video codec.
+// fileDuration opens an fMP4 and returns the total duration and video codec.
+// When a sidx index is present the duration is computed from the index in O(1);
+// otherwise it falls back to a full packet scan.
 func fileDuration(t *testing.T, path string) (time.Duration, int, videoCodec) {
 	t.Helper()
 
@@ -119,6 +133,15 @@ func fileDuration(t *testing.T, path string) (time.Duration, int, videoCodec) {
 
 	codec := detectVideoCodec(streams)
 
+	// Fast path: derive duration from sidx without reading any packets.
+	if sidx := dmx.Sidx(); len(sidx) > 0 {
+		last := sidx[len(sidx)-1]
+		dur := last.PTS + last.Duration
+
+		return dur, len(sidx), codec // frame count approximated by fragment count
+	}
+
+	// Slow path: read every packet.
 	var lastDTS time.Duration
 	var lastDur time.Duration
 	count := 0
