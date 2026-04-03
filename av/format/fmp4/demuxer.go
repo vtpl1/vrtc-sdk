@@ -246,6 +246,13 @@ func (d *Demuxer) SeekToKeyframe(target time.Duration) error {
 	d.pending = d.pending[:0]
 	d.pendingEmsg = d.pendingEmsg[:0]
 
+	// Eagerly load sidx if not yet parsed; the box sits after all
+	// fragments, so GetCodecs + ReadPacket alone will never see it
+	// before the first seek.
+	if len(d.sidx) == 0 {
+		d.loadSidx(rs)
+	}
+
 	// If we have a sidx index, use binary search.
 	if len(d.sidx) > 0 {
 		return d.seekViaSidx(rs, target)
@@ -347,6 +354,63 @@ func (d *Demuxer) seekViaMoofScan(rs io.ReadSeeker, target time.Duration) error 
 	d.pr.pos = bestPos
 
 	return nil
+}
+
+// loadSidx scans forward from mediaStartPos, reading 8-byte box headers and
+// seeking past payloads, to find and parse the sidx box. The reader position
+// is restored afterward. Only useful when the reader implements io.ReadSeeker.
+func (d *Demuxer) loadSidx(rs io.ReadSeeker) {
+	savedPos := d.pr.pos
+
+	if _, err := rs.Seek(d.mediaStartPos, io.SeekStart); err != nil {
+		return
+	}
+
+	d.pr.pos = d.mediaStartPos
+
+	var hdr [8]byte
+
+	for {
+		boxStart := d.pr.pos
+
+		if err := d.pr.readFull(hdr[:]); err != nil {
+			break
+		}
+
+		size := int64(binary.BigEndian.Uint32(hdr[0:4]))
+		typ := string(hdr[4:8])
+
+		if size < 8 {
+			break
+		}
+
+		if typ == "sidx" {
+			payload := make([]byte, size-8)
+			if err := d.pr.readFull(payload); err != nil {
+				break
+			}
+
+			if entries, ok := parseSidx(payload, d.mediaStartPos); ok {
+				d.sidx = entries
+			}
+
+			break
+		}
+
+		// Skip this box's payload.
+		if _, err := rs.Seek(boxStart+size, io.SeekStart); err != nil {
+			break
+		}
+
+		d.pr.pos = boxStart + size
+	}
+
+	// Restore original position.
+	if _, err := rs.Seek(savedPos, io.SeekStart); err != nil {
+		return
+	}
+
+	d.pr.pos = savedPos
 }
 
 // moofBaseTime extracts the base decode time from the first traf in a moof

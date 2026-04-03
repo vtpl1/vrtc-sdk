@@ -1165,3 +1165,90 @@ func TestBuildSidx_Empty(t *testing.T) {
 		t.Errorf("BuildSidx(nil) should return nil, got %d bytes", len(sidx))
 	}
 }
+
+// muxToBytesWithSidx creates a complete fMP4 file with a sidx box appended
+// after all fragments, matching the layout produced by segment.SegmentMuxer.
+func muxToBytesWithSidx(t *testing.T, streams []av.Stream, pkts []av.Packet) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	mux := fmp4.NewMuxer(&buf)
+	ctx := context.Background()
+
+	if err := mux.WriteHeader(ctx, streams); err != nil {
+		t.Fatalf("mux WriteHeader: %v", err)
+	}
+
+	for _, pkt := range pkts {
+		if err := mux.WritePacket(ctx, pkt); err != nil {
+			t.Fatalf("mux WritePacket: %v", err)
+		}
+	}
+
+	if err := mux.WriteTrailer(ctx, nil); err != nil {
+		t.Fatalf("mux WriteTrailer: %v", err)
+	}
+
+	fragIndex := mux.FragIndex()
+	sidx := fmp4.BuildSidx(fragIndex, 90000)
+	buf.Write(sidx)
+
+	return buf.Bytes()
+}
+
+// TestSeekToKeyframe_LoadsSidxEagerly verifies that a fresh demuxer loads the
+// sidx index on the first SeekToKeyframe call, even though GetCodecs returns
+// before reaching the sidx box and no ReadPacket calls have been made.
+func TestSeekToKeyframe_LoadsSidxEagerly(t *testing.T) {
+	const frameDur = 33 * time.Millisecond
+
+	h264 := makeH264Codec(t)
+	streams := []av.Stream{{Idx: 0, Codec: h264}}
+
+	// Build 10 frames: keyframe every 5th.
+	var pkts []av.Packet
+	for i := range 10 {
+		pkts = append(pkts, av.Packet{
+			Idx:       0,
+			KeyFrame:  i%5 == 0,
+			DTS:       time.Duration(i) * frameDur,
+			Data:      avcc(0x65, byte(i)), // minimal IDR NALU
+			CodecType: av.H264,
+		})
+	}
+
+	data := muxToBytesWithSidx(t, streams, pkts)
+
+	// Open a fresh demuxer on a seekable reader.
+	dmx := fmp4.NewDemuxer(bytes.NewReader(data))
+	ctx := context.Background()
+
+	if _, err := dmx.GetCodecs(ctx); err != nil {
+		t.Fatalf("GetCodecs: %v", err)
+	}
+
+	// Sidx must not be loaded yet — GetCodecs stops at moov.
+	if dmx.Sidx() != nil {
+		t.Fatal("Sidx should be nil immediately after GetCodecs")
+	}
+
+	// First seek should eagerly load the sidx.
+	target := 5 * frameDur // second keyframe
+	if err := dmx.SeekToKeyframe(target); err != nil {
+		t.Fatalf("SeekToKeyframe: %v", err)
+	}
+
+	if dmx.Sidx() == nil {
+		t.Fatal("Sidx should be populated after SeekToKeyframe")
+	}
+
+	// Read the first packet after seek — it must be at or before the target.
+	pkt, err := dmx.ReadPacket(ctx)
+	if err != nil {
+		t.Fatalf("ReadPacket after seek: %v", err)
+	}
+
+	if pkt.DTS > target {
+		t.Errorf("first packet DTS %v is after target %v", pkt.DTS, target)
+	}
+}
