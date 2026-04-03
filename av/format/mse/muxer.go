@@ -69,10 +69,11 @@ type outFrame struct {
 	data []byte
 }
 
-// MSEWriter is a WebSocket server and an av.MuxCloser.
+// MSEWriter is an av.MuxCloser that emits WebSocket-friendly text and binary
+// frames through caller-provided writers.
 //
-// Call New (or mount ServeHTTP on an existing mux) and then drive it exactly
-// like any other av.MuxCloser: WriteHeader → WritePacket* → WriteTrailer → Close.
+// Create it with NewFromWriters or NewFromFactories, then drive it like any
+// other av.MuxCloser: WriteHeader -> WritePacket* -> WriteTrailer -> Close.
 type MSEWriter struct {
 	binaryWriter  io.WriteCloser
 	binaryFactory BinaryWriterFactory

@@ -135,7 +135,7 @@ type DemuxerFactory func(ctx context.Context, sourceID string) (DemuxCloser, err
 type MuxerFactory   func(ctx context.Context, consumerID string) (MuxCloser, error)
 ```
 
-These are the primary extension points — pass them into `relayhub.New` to wire up any source/sink combination.
+These are the primary extension points. Pass `DemuxerFactory` into `relayhub.New`, then provide `MuxerFactory` per consumer via `ConsumeOptions` to wire up any source/sink combination.
 
 ---
 

@@ -3,6 +3,9 @@
 // Supported codecs:
 //   - H264 (RFC 6184)
 //   - H265 (RFC 7798)
+//   - AAC (MPEG4-GENERIC)
+//   - PCMU / PCMA
+//   - Opus
 //
 // The implementation is intentionally self-contained (no gortsplib dependency)
 // and is based on the same protocol flow: OPTIONS -> DESCRIBE -> SETUP -> PLAY.

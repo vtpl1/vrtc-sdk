@@ -1,0 +1,41 @@
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go build artifacts
+*.test
+*.out
+vendor/
+
+# Generated proto code (tracked separately)
+# gen/ is committed
+
+# Config secrets (.env.example is intentionally tracked)
+.env
+*.env
+*.secret
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Recording / HLS output dirs (runtime data)
+data/
+recordings/
+hls/
+logs/
+session/
+config/
+configs/
+.claude/
+.gocache/
+.gomodcache/
+.golangci-cache/
