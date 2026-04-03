@@ -763,9 +763,11 @@ func buildMvhd(durationMs uint32) []byte {
 
 func buildFtyp(tracks []*mp4Track) []byte {
 	codecBrand := "avc1" // default for H.264
+
 	for _, t := range tracks {
 		if _, ok := t.codec.(h265parser.CodecData); ok {
 			codecBrand = "hev1"
+
 			break
 		}
 	}
