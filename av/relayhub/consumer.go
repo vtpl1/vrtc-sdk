@@ -41,6 +41,11 @@ type Consumer struct {
 	// DTS to pass (e.g. audio sharing the same DTS as the last video packet).
 	skipBefore    time.Duration
 	skipBeforeSet atomic.Bool
+
+	// needsKeyframe is set when WritePacketLeaky drops a packet. While true,
+	// readWriteLoop skips non-keyframe video packets for this consumer so the
+	// decoder can resync cleanly.
+	needsKeyframe atomic.Bool
 }
 
 // NewConsumer creates a Consumer for the given consumerID. Start must be called
@@ -157,6 +162,24 @@ func (m *Consumer) WriteCodecChange(_ context.Context, changed []av.Stream) erro
 func (m *Consumer) SetSkipBefore(dts time.Duration) {
 	m.skipBefore = dts
 	m.skipBeforeSet.Store(true)
+}
+
+// ShouldSkip reports whether pkt overlaps with previously injected GOP data
+// and should not be enqueued. Once a packet passes the threshold the check is
+// permanently disabled (DTS is monotonically non-decreasing).
+// Called from readWriteLoop; safe for concurrent use.
+func (m *Consumer) ShouldSkip(pkt av.Packet) bool {
+	if !m.skipBeforeSet.Load() {
+		return false
+	}
+
+	if pkt.DTS < m.skipBefore {
+		return true
+	}
+
+	m.skipBeforeSet.CompareAndSwap(true, false)
+
+	return false
 }
 
 func (m *Consumer) WritePacket(ctx context.Context, pkt av.Packet) error {
@@ -293,14 +316,6 @@ func (m *Consumer) packetLoop(sctx context.Context, muxer *av.MuxCloser) error {
 }
 
 func (m *Consumer) handlePacket(sctx context.Context, muxer *av.MuxCloser, pkt av.Packet) error {
-	// Skip packets that overlap with the injected GOP to prevent duplicates.
-	// Strict less-than: packets at the exact boundary DTS pass through, which
-	// is correct for audio at the same DTS and harmless for video (the muxer's
-	// duration backfill handles zero-duration samples gracefully).
-	if m.skipBeforeSet.Load() && pkt.DTS < m.skipBefore {
-		return nil
-	}
-
 	if pkt.NewCodecs != nil {
 		if cc, ok := (*muxer).(av.CodecChanger); ok {
 			if err := cc.WriteCodecChange(sctx, pkt.NewCodecs); err != nil {

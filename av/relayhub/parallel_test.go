@@ -1883,6 +1883,56 @@ func TestConsumerErrChanHighLoad(t *testing.T) {
 
 // ── Keyframe cache tests ────────────────────────────────────────────────────
 
+// stallingMuxer records packets and blocks its consumer goroutine after
+// stallAfter packets have been written. Call unblock() to resume.
+type stallingMuxer struct {
+	mu         sync.Mutex
+	pkts       []av.Packet
+	stallAfter int
+	stallCh    chan struct{} // closed by unblock()
+	stalled    atomic.Bool
+}
+
+func newStallingMuxer(stallAfter int) *stallingMuxer {
+	return &stallingMuxer{
+		stallAfter: stallAfter,
+		stallCh:    make(chan struct{}),
+	}
+}
+
+func (m *stallingMuxer) WriteHeader(_ context.Context, _ []av.Stream) error { return nil }
+
+func (m *stallingMuxer) WritePacket(ctx context.Context, pkt av.Packet) error {
+	m.mu.Lock()
+	m.pkts = append(m.pkts, pkt)
+	n := len(m.pkts)
+	m.mu.Unlock()
+
+	if n == m.stallAfter {
+		m.stalled.Store(true)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-m.stallCh:
+		}
+	}
+
+	return nil
+}
+
+func (m *stallingMuxer) WriteTrailer(_ context.Context, _ error) error { return nil }
+func (m *stallingMuxer) Close() error                                  { return nil }
+
+func (m *stallingMuxer) unblock() { close(m.stallCh) }
+
+func (m *stallingMuxer) packets() []av.Packet {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return append([]av.Packet(nil), m.pkts...)
+}
+
 // keyframeDemuxer emits video packets, alternating between keyframes and
 // non-keyframes. Packets have CodecType set to H264 so the relay caches
 // keyframes.
@@ -1935,6 +1985,134 @@ func (m *recordingMuxer) packets() []av.Packet {
 	defer m.mu.Unlock()
 
 	return append([]av.Packet(nil), m.pkts...)
+}
+
+// TestDropRecoveryDeliversKeyframe verifies that after WritePacketLeaky drops a
+// packet (channel full → default branch), the next frame delivered to that
+// consumer is a keyframe so the decoder can resync cleanly.
+func TestDropRecoveryDeliversKeyframe(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+
+	streams := []av.Stream{{Idx: 0, Codec: fakeVideoCodec{typ: av.H264, width: 320, height: 240, timeScale: 90000}}}
+
+	sm := relayhub.New(func(_ context.Context, _ string) (av.DemuxCloser, error) {
+		return &keyframeDemuxer{streams: streams}, nil
+	}, nil)
+
+	if err := sm.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() { _ = sm.Stop() }()
+
+	// Fast consumer — never blocks, ensures the relay keeps producing packets.
+	fastMux := &recordingMuxer{}
+
+	h1, err := sm.Consume(ctx, "src1", av.ConsumeOptions{
+		ConsumerID: "fast",
+		MuxerFactory: func(_ context.Context, _ string) (av.MuxCloser, error) {
+			return fastMux, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Consume fast: %v", err)
+	}
+
+	defer func() { _ = h1.Close(ctx) }()
+
+	// Slow consumer — stalls after 3 packets so its channel (buffer=50) fills
+	// and WritePacketLeaky takes the default/drop path.
+	slowMux := newStallingMuxer(3)
+
+	h2, err := sm.Consume(ctx, "src1", av.ConsumeOptions{
+		ConsumerID: "slow",
+		MuxerFactory: func(_ context.Context, _ string) (av.MuxCloser, error) {
+			return slowMux, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Consume slow: %v", err)
+	}
+
+	defer func() { _ = h2.Close(ctx) }()
+
+	// Wait until the slow consumer has stalled. Once stalled, its channel will
+	// fill up and further WritePacketLeaky calls will hit the default branch.
+	deadline := time.After(5 * time.Second)
+
+	for !slowMux.stalled.Load() {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for slow consumer to stall")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	// Wait for enough packets that drops have definitely occurred.
+	// The slow consumer's channel holds 50 packets; we need > 50 more packets
+	// after the stall to guarantee at least one drop.
+	deadline = time.After(5 * time.Second)
+
+	for {
+		pkts := fastMux.packets()
+		if len(pkts) > 100 {
+			break
+		}
+
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for fast consumer to receive enough packets")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// Unblock the slow consumer so it drains its channel and receives new
+	// (post-recovery) packets from the relay.
+	slowMux.unblock()
+
+	// Wait for the slow consumer to receive post-recovery packets.
+	deadline = time.After(5 * time.Second)
+
+	for {
+		pkts := slowMux.packets()
+		// After unblocking: 3 pre-stall + 50 buffered + some post-recovery.
+		// Need enough post-recovery packets to verify the invariant.
+		if len(pkts) > 60 {
+			break
+		}
+
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for slow consumer to receive post-recovery packets")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// Verify: wherever there is a DTS gap (indicating dropped packets), the
+	// packet immediately after the gap must be a keyframe.
+	pkts := slowMux.packets()
+	expectedInterval := time.Second / 250 // DTS step between consecutive packets
+
+	gapFound := false
+
+	for i := 1; i < len(pkts); i++ {
+		gap := pkts[i].DTS - pkts[i-1].DTS
+		if gap > expectedInterval*2 { // allow small jitter, detect real drops
+			gapFound = true
+
+			if !pkts[i].KeyFrame {
+				t.Errorf("after drop gap at pkt[%d] (DTS %v → %v, gap %v), "+
+					"expected keyframe but got KeyFrame=%v",
+					i, pkts[i-1].DTS, pkts[i].DTS, gap, pkts[i].KeyFrame)
+			}
+		}
+	}
+
+	if !gapFound {
+		t.Fatal("no DTS gap detected — drops did not occur; test setup is broken")
+	}
 }
 
 // TestKeyframeCacheForLateJoiner verifies that a consumer added after the relay

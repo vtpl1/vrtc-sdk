@@ -543,6 +543,10 @@ func (m *Relay) readWriteLoop(ctx context.Context) {
 			//     misses frames that do not fit in its queue.
 			if len(active) == 1 {
 				for _, c := range active {
+					if c.ShouldSkip(pkt) {
+						continue
+					}
+
 					_ = c.WritePacket(ctx, pkt)
 				}
 
@@ -550,8 +554,23 @@ func (m *Relay) readWriteLoop(ctx context.Context) {
 			}
 
 			for _, c := range active {
+				if c.ShouldSkip(pkt) {
+					continue
+				}
+
+				// After a drop, skip non-keyframe video packets so the
+				// consumer's decoder can resync on a clean IDR boundary.
+				if c.needsKeyframe.Load() {
+					if !pkt.KeyFrame {
+						continue
+					}
+
+					c.needsKeyframe.Store(false)
+				}
+
 				if err := c.WritePacketLeaky(ctx, pkt); errors.Is(err, ErrDroppingPacket) {
 					m.droppedPackets.Add(1)
+					c.needsKeyframe.Store(true)
 				}
 			}
 		}
