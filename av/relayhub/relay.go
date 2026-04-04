@@ -3,6 +3,7 @@ package relayhub
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"maps"
 	"sync"
 	"sync/atomic"
@@ -51,6 +52,9 @@ type Relay struct {
 	droppedPackets   atomic.Uint64
 	lastPacketAtNs   atomic.Int64 // unix nanoseconds; 0 = no packet yet
 	startedAt        time.Time    // set once in Start; zero until Start is called
+
+	// Rate-limited drop logging: only log once per dropLogInterval.
+	lastDropLog atomic.Int64 // unix nanoseconds
 }
 
 func cloneStreamHeaders(streams []av.Stream) []av.Stream {
@@ -572,9 +576,31 @@ func (m *Relay) readWriteLoop(ctx context.Context) {
 				if err := c.WritePacketLeaky(ctx, pkt); errors.Is(err, ErrDroppingPacket) {
 					m.droppedPackets.Add(1)
 					c.needsKeyframe.Store(true)
+					m.logDropRateLimited()
 				}
 			}
 		}
+	}
+}
+
+const dropLogInterval = 10 * time.Second
+
+// logDropRateLimited emits a warning log when packets are being dropped, at
+// most once per dropLogInterval to avoid log spam.
+func (m *Relay) logDropRateLimited() {
+	now := time.Now().UnixNano()
+	last := m.lastDropLog.Load()
+
+	if now-last < int64(dropLogInterval) {
+		return
+	}
+
+	if m.lastDropLog.CompareAndSwap(last, now) {
+		slog.Warn("relay: dropping packets for slow consumer(s)",
+			"relay", m.id,
+			"total_dropped", m.droppedPackets.Load(),
+			"consumers", m.ConsumerCount(),
+		)
 	}
 }
 

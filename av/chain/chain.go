@@ -30,6 +30,16 @@ type SegmentSource interface {
 	Next(ctx context.Context) (av.DemuxCloser, error)
 }
 
+// GapDetector is an optional interface that a SegmentSource may implement to
+// report wall-clock gaps between consecutive segments. When implemented,
+// ChainingDemuxer sets IsDiscontinuity on the first packet after a gap.
+type GapDetector interface {
+	// LastGap returns the wall-clock gap detected at the most recent segment
+	// transition (i.e. the last call to Next). Returns zero if no significant
+	// gap exists.
+	LastGap() time.Duration
+}
+
 // ChainingDemuxer chains multiple segment demuxers into a single monotonic
 // av.DemuxCloser stream. DTS values are adjusted at each segment boundary
 // so that timestamps are monotonically non-decreasing across all segments.
@@ -41,10 +51,11 @@ type SegmentSource interface {
 // ChainingDemuxer is not safe for concurrent use; it is designed for a
 // single consumer goroutine's read loop.
 type ChainingDemuxer struct {
-	source  SegmentSource
-	cur     av.DemuxCloser
-	dtsOff  time.Duration // cumulative DTS offset for current segment
-	lastEnd time.Duration // DTS + Duration of the last emitted packet (after offset)
+	source        SegmentSource
+	cur           av.DemuxCloser
+	dtsOff        time.Duration // cumulative DTS offset for current segment
+	lastEnd       time.Duration // DTS + Duration of the last emitted packet (after offset)
+	discontinuity bool          // set after a gap-detected segment transition
 }
 
 // NewChainingDemuxer returns a ChainingDemuxer that reads from first and
@@ -78,6 +89,12 @@ func (c *ChainingDemuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 				c.lastEnd = end
 			}
 
+			// Mark the first packet after a gap-detected segment transition.
+			if c.discontinuity {
+				pkt.IsDiscontinuity = true
+				c.discontinuity = false
+			}
+
 			return pkt, nil
 		}
 
@@ -95,6 +112,11 @@ func (c *ChainingDemuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 		}
 
 		c.cur = next
+
+		// Check if the source reports a wall-clock gap at this transition.
+		if gd, ok := c.source.(GapDetector); ok && gd.LastGap() > 0 {
+			c.discontinuity = true
+		}
 
 		// Read and discard the init segment (GetCodecs) so ReadPacket
 		// starts at the first media fragment.
