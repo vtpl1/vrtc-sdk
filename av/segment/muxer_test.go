@@ -82,7 +82,7 @@ func TestNewSegmentMuxer_InvalidPath(t *testing.T) {
 	t.Parallel()
 
 	_, err := segment.NewSegmentMuxer(
-		"/dev/null/impossible/seg.mp4",
+		"invalid\x00path/seg.mp4",
 		time.Now(), segment.ProfileSSD, 0, 0, nil, nil,
 	)
 	if err == nil {

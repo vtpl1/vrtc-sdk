@@ -240,7 +240,9 @@ func (m *Relay) Close() error {
 	}
 
 	m.wg.Wait()
-	m.pktBuf.Close()
+	if m.pktBuf != nil {
+		m.pktBuf.Close()
+	}
 
 	return nil
 }

@@ -73,17 +73,18 @@ Returns available recording periods for the timeline bar.
 
 Use this to render the timeline bar. Gaps between segments indicate periods with no recording.
 
-### 2. WebSocket Playback: `WS /ws/recorded`
+### 2. WebSocket Playback: `WS /ws/stream`
 
-Streams fMP4 fragments over WebSocket for MSE consumption.
+Streams fMP4 fragments over WebSocket for MSE consumption. Always operates in
+follow mode — playback continues into live when it reaches the end of recorded
+segments.
 
 **Query Parameters:**
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
-| `camera_id` | UUID | yes | Camera to play |
-| `start` | RFC3339 | no | Wall-clock start time (default: 24h ago) |
-| `end` | RFC3339 | no | Wall-clock end time. **Omit for follow mode** (live tail of recording) |
+| `camera_id` | string | yes | Camera/channel identifier |
+| `start` | RFC3339 | no | Wall-clock start time. Omit for live mode. |
 
 **Client -> Server messages (JSON text frames):**
 
@@ -108,9 +109,11 @@ Streams fMP4 fragments over WebSocket for MSE consumption.
 | 3+ | Binary | fMP4 fragments (moof + mdat), continuous |
 | interleaved | Text | `FrameAnalytics` JSON (when analytics are present) |
 
-### 3. HTTP Playback: `GET /playback/{camera_id}`
+### 3. HTTP Playback: `GET /api/cameras/{camera_id}/stream`
 
-Same query parameters as WebSocket. Returns chunked `video/mp4` stream. Simpler but no bidirectional control (no pause/seek commands).
+Returns chunked `video/mp4` stream. Omit `start` for live; provide `start`
+(RFC3339) for recorded playback in follow mode. Simpler than WebSocket but no
+bidirectional control (no pause/seek commands).
 
 ## Implementation Guide
 
@@ -158,7 +161,7 @@ function startPlayback(cameraId: string, startTime: Date): PlaybackState {
 
   const state: PlaybackState = {
     ws: new WebSocket(
-      `/ws/recorded?camera_id=${cameraId}&start=${startTime.toISOString()}`
+      `/api/cameras/ws/stream?camera_id=${cameraId}&start=${startTime.toISOString()}`
     ),
     mediaSource: ms,
     sourceBuffer: null,
@@ -516,12 +519,13 @@ const wallClockMs = state.streamStartWallClock.getTime() + emsg.presentationTime
 
 ## Follow Mode (Live Tail of Recording)
 
-Omit the `end` parameter to enter follow mode. The server polls for new segments and streams them as they appear. Useful for viewing footage that is still being recorded.
+Both HTTP and WebSocket playback always operate in follow mode. The server
+polls for new segments and streams them as they appear, seamlessly
+transitioning into live when recorded footage runs out.
 
 ```typescript
-// Follow mode — no end time
 const ws = new WebSocket(
-  `/ws/recorded?camera_id=${cameraId}&start=${startTime.toISOString()}`
+  `/api/cameras/ws/stream?camera_id=${cameraId}&start=${startTime.toISOString()}`
 );
 ```
 
@@ -540,12 +544,9 @@ In follow mode, `video.currentTime` continues to grow as new fragments arrive. T
 ## Quick Reference
 
 ```
-Timeline API:       GET  /api/timeline/{camera_id}?start=RFC3339&end=RFC3339
-Playback (HTTP):    GET  /playback/{camera_id}?start=RFC3339&end=RFC3339
-Playback (WS):      WS   /ws/recorded?camera_id=UUID&start=RFC3339[&end=RFC3339]
-Recording detail:   GET  /recordings/{camera_id}?start=RFC3339&end=RFC3339
-Recording status:   GET  /recording/{camera_id}/status
-Recording timeline: GET  /recording/{camera_id}/timeline?start=RFC3339&end=RFC3339
+Timeline API:       GET  /api/recording/timeline?camera_id=ID&start=RFC3339&end=RFC3339
+Playback (HTTP):    GET  /api/cameras/{camera_id}/stream?start=RFC3339
+Playback (WS):      WS   /api/cameras/ws/stream?camera_id=ID&start=RFC3339
 
 Wall-clock -> mediaTime:  (wallClock.getTime() - streamStartWallClock.getTime()) / 1000
 mediaTime -> wall-clock:  new Date(streamStartWallClock.getTime() + video.currentTime * 1000)

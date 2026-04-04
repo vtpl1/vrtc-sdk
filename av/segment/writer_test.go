@@ -129,7 +129,7 @@ func TestAdaptiveWriter_InvalidPath(t *testing.T) {
 	t.Parallel()
 
 	_, err := segment.NewAdaptiveWriter(
-		"/dev/null/impossible/test.mp4",
+		"invalid\x00path/test.mp4",
 		segment.ProfileSSD, 0, false,
 	)
 	if err == nil {
