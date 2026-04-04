@@ -457,6 +457,241 @@ func (s *seekableSource) OpenAt(_ context.Context, ts time.Time) (av.DemuxCloser
 	return fmp4.NewDemuxer(bytes.NewReader(data)), nil
 }
 
+// minimalAVCRecordLevel40 is a synthetic AVCDecoderConfigurationRecord for
+// a 320x240 Baseline-profile H.264 stream at level 4.0. The different level
+// produces a different RFC 6381 Tag() ("avc1.420028" vs "avc1.42001E"),
+// which streamsChanged detects as a codec change.
+var minimalAVCRecordLevel40 = []byte{
+	0x01,             // configurationVersion
+	0x42, 0x00, 0x28, // profile_idc=66 (Baseline), constraint_flags, level_idc=40 (4.0)
+	0xFF,       // lengthSizeMinusOne = 3
+	0xE1,       // numSequenceParameterSets = 1
+	0x00, 0x0F, // SPS length
+	0x67, 0x42, 0x00, 0x28,
+	0xAC, 0xD9, 0x40, 0xA0,
+	0x3D, 0xA1, 0x00, 0x00,
+	0x03, 0x00, 0x00,
+	0x01,       // numPictureParameterSets = 1
+	0x00, 0x04, // PPS length
+	0x68, 0xCE, 0x38, 0x80,
+}
+
+func makeH264Level40Codec(t *testing.T) h264parser.CodecData {
+	t.Helper()
+
+	c, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(minimalAVCRecordLevel40)
+	if err != nil {
+		t.Fatalf("h264parser level40: %v", err)
+	}
+
+	return c
+}
+
+// makeSegmentWithCodec creates a segment using the given codec data.
+func makeSegmentWithCodec(t *testing.T, nPackets int, codec av.CodecData) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	m := fmp4.NewMuxer(&buf)
+	ctx := context.Background()
+
+	streams := []av.Stream{{Idx: 0, Codec: codec}}
+
+	if err := m.WriteHeader(ctx, streams); err != nil {
+		t.Fatalf("WriteHeader: %v", err)
+	}
+
+	for i := range nPackets {
+		pkt := av.Packet{
+			KeyFrame:  true,
+			Idx:       0,
+			DTS:       time.Duration(i) * frameDur,
+			Duration:  frameDur,
+			Data:      []byte{0x00, 0x00, 0x00, 0x01, 0x65, 0xDE, 0xAD},
+			CodecType: av.H264,
+		}
+
+		if err := m.WritePacket(ctx, pkt); err != nil {
+			t.Fatalf("WritePacket(%d): %v", i, err)
+		}
+	}
+
+	if err := m.WriteTrailer(ctx, nil); err != nil {
+		t.Fatalf("WriteTrailer: %v", err)
+	}
+
+	return buf.Bytes()
+}
+
+// ── Codec change detection tests ──────────────────────────────────────────
+
+func TestChainingDemuxer_CodecChange_AtSegmentBoundary(t *testing.T) {
+	t.Parallel()
+
+	// Segment 1: Baseline profile H.264
+	seg1 := makeSegment(t, 2)
+	// Segment 2: High profile H.264 — different Tag()
+	seg2 := makeSegmentWithCodec(t, 2, makeH264Level40Codec(t))
+
+	src := &bytesSource{segments: [][]byte{seg2}}
+	first := demuxerFromBytes(seg1)
+	cd := chain.NewChainingDemuxer(first, src)
+	ctx := context.Background()
+
+	if _, err := cd.GetCodecs(ctx); err != nil {
+		t.Fatalf("GetCodecs: %v", err)
+	}
+
+	// Read all packets from both segments.
+	var allPkts []av.Packet
+	for {
+		pkt, err := cd.ReadPacket(ctx)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("ReadPacket: %v", err)
+		}
+		allPkts = append(allPkts, pkt)
+	}
+
+	// Expect 4 total packets (2 from each segment).
+	if len(allPkts) != 4 {
+		t.Fatalf("expected 4 packets, got %d", len(allPkts))
+	}
+
+	// The first packet from the second segment (index 2) should carry NewCodecs.
+	if allPkts[2].NewCodecs == nil {
+		t.Fatal("expected NewCodecs on first packet of second segment (codec changed)")
+	}
+
+	if len(allPkts[2].NewCodecs) != 1 {
+		t.Fatalf("expected 1 stream in NewCodecs, got %d", len(allPkts[2].NewCodecs))
+	}
+
+	// Packets 0, 1, 3 should NOT carry NewCodecs.
+	for _, idx := range []int{0, 1, 3} {
+		if allPkts[idx].NewCodecs != nil {
+			t.Errorf("packet %d should not have NewCodecs", idx)
+		}
+	}
+}
+
+func TestChainingDemuxer_NoCodecChange_SameCodec(t *testing.T) {
+	t.Parallel()
+
+	// Both segments use the same codec — no NewCodecs should appear.
+	seg1 := makeSegment(t, 2)
+	seg2 := makeSegment(t, 2)
+
+	src := &bytesSource{segments: [][]byte{seg2}}
+	first := demuxerFromBytes(seg1)
+	cd := chain.NewChainingDemuxer(first, src)
+	ctx := context.Background()
+
+	if _, err := cd.GetCodecs(ctx); err != nil {
+		t.Fatalf("GetCodecs: %v", err)
+	}
+
+	for {
+		pkt, err := cd.ReadPacket(ctx)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("ReadPacket: %v", err)
+		}
+		if pkt.NewCodecs != nil {
+			t.Fatal("unexpected NewCodecs when segments have the same codec")
+		}
+	}
+}
+
+func TestChainingDemuxer_Seek_CodecChange(t *testing.T) {
+	t.Parallel()
+
+	// Segment 1: Baseline. Segment 2: High profile.
+	seg1 := makeSegment(t, 3)
+	seg2 := makeSegmentWithCodec(t, 3, makeH264Level40Codec(t))
+
+	wallTime := time.Date(2026, 4, 2, 14, 0, 0, 0, time.UTC)
+
+	src := &seekableSource{
+		segments: map[string][]byte{
+			wallTime.Format(time.RFC3339): seg2,
+		},
+	}
+
+	first := demuxerFromBytes(seg1)
+	cd := chain.NewChainingDemuxer(first, src)
+	ctx := context.Background()
+
+	if _, err := cd.GetCodecs(ctx); err != nil {
+		t.Fatalf("GetCodecs: %v", err)
+	}
+
+	// Read one packet from seg1 to establish prevStreams baseline.
+	if _, err := cd.ReadPacket(ctx); err != nil {
+		t.Fatalf("ReadPacket: %v", err)
+	}
+
+	// Seek to seg2 (different codec).
+	if err := cd.Seek(ctx, wallTime, 0); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+
+	// First packet after seek should carry NewCodecs.
+	pkt, err := cd.ReadPacket(ctx)
+	if err != nil {
+		t.Fatalf("ReadPacket after seek: %v", err)
+	}
+
+	if pkt.NewCodecs == nil {
+		t.Fatal("expected NewCodecs on first packet after seeking to different codec")
+	}
+}
+
+func TestChainingDemuxer_Seek_NoCodecChange(t *testing.T) {
+	t.Parallel()
+
+	// Both segments use the same codec — seek should NOT emit NewCodecs.
+	seg1 := makeSegment(t, 3)
+	seg2 := makeSegment(t, 3)
+
+	wallTime := time.Date(2026, 4, 2, 14, 0, 0, 0, time.UTC)
+
+	src := &seekableSource{
+		segments: map[string][]byte{
+			wallTime.Format(time.RFC3339): seg2,
+		},
+	}
+
+	first := demuxerFromBytes(seg1)
+	cd := chain.NewChainingDemuxer(first, src)
+	ctx := context.Background()
+
+	if _, err := cd.GetCodecs(ctx); err != nil {
+		t.Fatalf("GetCodecs: %v", err)
+	}
+
+	if _, err := cd.ReadPacket(ctx); err != nil {
+		t.Fatalf("ReadPacket: %v", err)
+	}
+
+	if err := cd.Seek(ctx, wallTime, 0); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+
+	pkt, err := cd.ReadPacket(ctx)
+	if err != nil {
+		t.Fatalf("ReadPacket after seek: %v", err)
+	}
+
+	if pkt.NewCodecs != nil {
+		t.Fatal("unexpected NewCodecs when seeking to same codec")
+	}
+}
+
 func TestChainingDemuxer_Seek_NotSeekable(t *testing.T) {
 	t.Parallel()
 

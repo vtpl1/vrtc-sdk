@@ -56,6 +56,12 @@ type ChainingDemuxer struct {
 	dtsOff        time.Duration // cumulative DTS offset for current segment
 	lastEnd       time.Duration // DTS + Duration of the last emitted packet (after offset)
 	discontinuity bool          // set after a gap-detected segment transition
+
+	// prevStreams holds the codec state from the previous segment so that
+	// codec changes at segment boundaries can be detected and propagated
+	// via Packet.NewCodecs. Nil until the first GetCodecs call.
+	prevStreams      []av.Stream
+	pendingNewCodecs []av.Stream // non-nil when a codec change was detected at a segment boundary
 }
 
 // NewChainingDemuxer returns a ChainingDemuxer that reads from first and
@@ -69,8 +75,17 @@ func NewChainingDemuxer(first av.DemuxCloser, source SegmentSource) *ChainingDem
 }
 
 // GetCodecs delegates to the current (initially first) demuxer's GetCodecs.
+// It also stores the returned streams for codec-change detection at the next
+// segment boundary.
 func (c *ChainingDemuxer) GetCodecs(ctx context.Context) ([]av.Stream, error) {
-	return c.cur.GetCodecs(ctx)
+	streams, err := c.cur.GetCodecs(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	c.prevStreams = cloneStreams(streams)
+
+	return streams, nil
 }
 
 // ReadPacket returns the next packet across all chained segments. When the
@@ -93,6 +108,12 @@ func (c *ChainingDemuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 			if c.discontinuity {
 				pkt.IsDiscontinuity = true
 				c.discontinuity = false
+			}
+
+			// Propagate codec change detected at the last segment boundary.
+			if c.pendingNewCodecs != nil {
+				pkt.NewCodecs = c.pendingNewCodecs
+				c.pendingNewCodecs = nil
 			}
 
 			return pkt, nil
@@ -118,12 +139,18 @@ func (c *ChainingDemuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 			c.discontinuity = true
 		}
 
-		// Read and discard the init segment (GetCodecs) so ReadPacket
-		// starts at the first media fragment.
-		if _, err = c.cur.GetCodecs(ctx); err != nil {
-			return av.Packet{}, err
+		// Read the init segment (GetCodecs) from the new segment and
+		// compare with the previous segment's codecs to detect changes.
+		newStreams, gerr := c.cur.GetCodecs(ctx)
+		if gerr != nil {
+			return av.Packet{}, gerr
 		}
 
+		if c.prevStreams != nil && streamsChanged(c.prevStreams, newStreams) {
+			c.pendingNewCodecs = cloneStreams(newStreams)
+		}
+
+		c.prevStreams = cloneStreams(newStreams)
 		c.dtsOff = c.lastEnd
 	}
 }
@@ -182,11 +209,19 @@ func (c *ChainingDemuxer) Seek(
 	}
 
 	// Read codec headers from the new segment.
-	if _, err := dmx.GetCodecs(ctx); err != nil {
+	newStreams, gerr := dmx.GetCodecs(ctx)
+	if gerr != nil {
 		_ = dmx.Close()
 
-		return err
+		return gerr
 	}
+
+	// Detect codec changes between the previous position and the seek target.
+	if c.prevStreams != nil && streamsChanged(c.prevStreams, newStreams) {
+		c.pendingNewCodecs = cloneStreams(newStreams)
+	}
+
+	c.prevStreams = cloneStreams(newStreams)
 
 	// Seek within the segment if the demuxer supports it.
 	if seekPTS > 0 {
@@ -234,4 +269,56 @@ func (s *sliceSource) Next(ctx context.Context) (av.DemuxCloser, error) {
 	s.idx++
 
 	return s.open(ctx, id)
+}
+
+// tagger is implemented by codec data types that produce an RFC 6381 codec tag
+// (e.g. "avc1.64001E" for H.264 High Profile). Used for fine-grained codec
+// change detection beyond just the CodecType.
+type tagger interface{ Tag() string }
+
+// streamsChanged reports whether the codec configuration has meaningfully
+// changed between two stream sets. It checks stream count, indices, codec
+// types, codec tags (profile/level), and video dimensions.
+func streamsChanged(prev, next []av.Stream) bool {
+	if len(prev) != len(next) {
+		return true
+	}
+
+	for i := range prev {
+		if prev[i].Idx != next[i].Idx {
+			return true
+		}
+
+		if prev[i].Codec.Type() != next[i].Codec.Type() {
+			return true
+		}
+
+		// Check codec-specific parameters via RFC 6381 tag (profile/level/etc).
+		pt, ptOK := prev[i].Codec.(tagger)
+		nt, ntOK := next[i].Codec.(tagger)
+
+		if ptOK && ntOK && pt.Tag() != nt.Tag() {
+			return true
+		}
+
+		// Check video dimensions.
+		pv, pvOK := prev[i].Codec.(av.VideoCodecData)
+		nv, nvOK := next[i].Codec.(av.VideoCodecData)
+
+		if pvOK && nvOK {
+			if pv.Width() != nv.Width() || pv.Height() != nv.Height() {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// cloneStreams returns a shallow copy of the stream slice.
+func cloneStreams(ss []av.Stream) []av.Stream {
+	c := make([]av.Stream, len(ss))
+	copy(c, ss)
+
+	return c
 }

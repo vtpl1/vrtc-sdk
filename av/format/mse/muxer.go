@@ -356,6 +356,25 @@ func (m *MSEWriter) WriteCodecChange(ctx context.Context, changed []av.Stream) e
 	return err
 }
 
+// CodecString returns the current MIME codec string (e.g.
+// `video/mp4; codecs="avc1.64001E,flac"`). Returns empty if WriteHeader has
+// not been called yet. Safe for concurrent use.
+func (m *MSEWriter) CodecString() string {
+	m.codecsMu.RLock()
+	defer m.codecsMu.RUnlock()
+
+	return m.codecStr
+}
+
+// InitSegment returns the current fMP4 init segment (ftyp+moov). Returns nil
+// if WriteHeader has not been called yet. Safe for concurrent use.
+func (m *MSEWriter) InitSegment() []byte {
+	m.codecsMu.RLock()
+	defer m.codecsMu.RUnlock()
+
+	return m.initSeg
+}
+
 // Close flushes remaining samples and closes pre-opened writers.
 // Safe to call multiple times.
 func (m *MSEWriter) Close() error {
