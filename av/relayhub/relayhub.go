@@ -33,6 +33,21 @@ func WithMaxConsumers(n int) RelayOption {
 	return func(r *Relay) { r.maxConsumers = n }
 }
 
+// WithMaxFPS overrides the per-relay packet read rate cap (default: 250).
+func WithMaxFPS(n int) RelayOption {
+	return func(r *Relay) { r.maxFpsOverride = n }
+}
+
+// WithPacketBufferWindow overrides the GOP replay buffer duration (default: 30s).
+func WithPacketBufferWindow(d time.Duration) RelayOption {
+	return func(r *Relay) { r.packetBufWindow = d }
+}
+
+// WithConsumerQueueSize overrides the per-consumer packet channel buffer (default: 50).
+func WithConsumerQueueSize(n int) RelayOption {
+	return func(r *Relay) { r.consumerQueueSize = n }
+}
+
 // RelayHub is the concrete implementation of av.RelayHub. Use New to create one.
 type RelayHub struct {
 	demuxerFactory av.DemuxerFactory

@@ -44,6 +44,11 @@ type Relay struct {
 	// playback relays so that leaky delivery mode is never triggered.
 	maxConsumers int
 
+	// Configurable constants (0 means use package default).
+	maxFpsOverride    int
+	packetBufWindow   time.Duration
+	consumerQueueSize int
+
 	// metrics — updated from readWriteLoop; read via Stats()
 	packetsRead      atomic.Uint64
 	videoPacketsRead atomic.Uint64
@@ -78,7 +83,6 @@ func NewRelay(
 		demuxerRemover:   demuxerRemover,
 		headersAvailable: make(chan struct{}),
 		consumers:        make(map[string]*Consumer),
-		pktBuf:           packetbuf.New(30 * time.Second),
 	}
 
 	return m
@@ -94,6 +98,15 @@ func (m *Relay) Start(ctx context.Context) error {
 	if m.alreadyClosing.Load() {
 		return ErrRelayClosing
 	}
+
+	// Initialise packet buffer with configurable window (default 30s).
+	// Done here so that RelayOptions applied after NewRelay take effect.
+	bufWindow := 30 * time.Second
+	if m.packetBufWindow > 0 {
+		bufWindow = m.packetBufWindow
+	}
+
+	m.pktBuf = packetbuf.New(bufWindow)
 
 	sctx, cancel := context.WithCancel(ctx)
 
@@ -272,6 +285,13 @@ func (m *Relay) Stats() av.RelayStats {
 	lastErr := m.headersErr
 	startedAt := m.startedAt
 	headers := m.headers
+
+	var totalRotations, totalSkips uint64
+	for _, c := range m.consumers {
+		totalRotations += c.Rotations()
+		totalSkips += c.Skips()
+	}
+
 	m.mu.RUnlock()
 
 	errStr := ""
@@ -332,6 +352,8 @@ func (m *Relay) Stats() av.RelayStats {
 		Streams:        streams,
 		ActualFPS:      actualFPS,
 		BitrateBps:     bitrateBps,
+		Rotations:      totalRotations,
+		Skips:          totalSkips,
 	}
 }
 
@@ -390,7 +412,12 @@ func (m *Relay) AddConsumer(
 		return errors.Join(ErrCodecsNotAvailable, err)
 	}
 
-	c := NewConsumer(consumerID, muxerFactory, muxerRemover, errChan)
+	queueSize := 50
+	if m.consumerQueueSize > 0 {
+		queueSize = m.consumerQueueSize
+	}
+
+	c := NewConsumer(consumerID, muxerFactory, muxerRemover, errChan, queueSize)
 
 	if err := c.Start(sctx); err != nil { //nolint:contextcheck
 		c.inactive.Store(true)
@@ -489,7 +516,12 @@ func (m *Relay) Resume(ctx context.Context) error {
 }
 
 func (m *Relay) readWriteLoop(ctx context.Context) {
-	fpsLimitTicker := time.NewTicker(time.Second / time.Duration(maxFps))
+	fps := maxFps
+	if m.maxFpsOverride > 0 {
+		fps = m.maxFpsOverride
+	}
+
+	fpsLimitTicker := time.NewTicker(time.Second / time.Duration(fps))
 	defer fpsLimitTicker.Stop()
 
 	for {

@@ -32,6 +32,10 @@ type RelayStats struct {
 	Streams    []StreamInfo `json:"streams,omitempty"`
 	ActualFPS  float64      `json:"actualFps"`
 	BitrateBps float64      `json:"bitrateBps"`
+
+	// Consumer-aggregated counters.
+	Rotations uint64 `json:"rotations"` // total muxer rotations across all consumers
+	Skips     uint64 `json:"skips"`     // total keyframe-recovery skips across all consumers
 }
 
 // ConsumeOptions configures a consumer attachment to a relay.

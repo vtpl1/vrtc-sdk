@@ -46,23 +46,33 @@ type Consumer struct {
 	// readWriteLoop skips non-keyframe video packets for this consumer so the
 	// decoder can resync cleanly.
 	needsKeyframe atomic.Bool
+
+	// Counters for observability.
+	rotations atomic.Uint64 // muxer rotation count
+	skips     atomic.Uint64 // keyframe-recovery skip count
 }
 
 // NewConsumer creates a Consumer for the given consumerID. Start must be called
-// before any packets can be delivered.
+// before any packets can be delivered. queueSize sets the packet channel buffer
+// size; values <= 0 default to 50.
 func NewConsumer(
 	consumerID string,
 	muxerFactory av.MuxerFactory,
 	muxerRemover av.MuxerRemover,
 	errCh chan<- error,
+	queueSize int,
 ) *Consumer {
+	if queueSize <= 0 {
+		queueSize = 50
+	}
+
 	m := &Consumer{
 		id:               consumerID,
 		muxerFactory:     muxerFactory,
 		muxerRemover:     muxerRemover,
 		errCh:            errCh,
 		headersAvailable: make(chan []av.Stream, 1),
-		packets:          make(chan av.Packet, 50),
+		packets:          make(chan av.Packet, queueSize),
 	}
 
 	return m
@@ -173,6 +183,8 @@ func (m *Consumer) NeedsKeyframeRecovery(pkt av.Packet) bool {
 	}
 
 	if !pkt.KeyFrame {
+		m.skips.Add(1)
+
 		return true
 	}
 
@@ -237,6 +249,12 @@ func (m *Consumer) LastError() error {
 func (m *Consumer) Inactive() bool {
 	return m.inactive.Load()
 }
+
+// Rotations returns the number of muxer rotations this consumer has performed.
+func (m *Consumer) Rotations() uint64 { return m.rotations.Load() }
+
+// Skips returns the number of packets skipped during keyframe recovery.
+func (m *Consumer) Skips() uint64 { return m.skips.Load() }
 
 func (m *Consumer) run(sctx context.Context, cancel context.CancelFunc) {
 	defer cancel()
@@ -353,6 +371,7 @@ func (m *Consumer) handlePacket(sctx context.Context, muxer *av.MuxCloser, pkt a
 }
 
 func (m *Consumer) rotateMuxer(sctx context.Context, muxer *av.MuxCloser, pkt av.Packet) error {
+	m.rotations.Add(1)
 	m.closeMuxer(sctx, *muxer)
 
 	newMuxer, err := m.openAndInitMuxer(sctx)
