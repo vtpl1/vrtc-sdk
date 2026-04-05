@@ -73,7 +73,7 @@ func parseSenderReport(packet []byte) (senderReport, error) {
 	}, nil
 }
 
-func ntpToTime(seconds uint32, fraction uint32) time.Time {
+func ntpToTime(seconds, fraction uint32) time.Time {
 	secs := int64(seconds) - ntpUnixOffsetSeconds
 	nsecs := (int64(fraction) * int64(time.Second)) >> 32
 

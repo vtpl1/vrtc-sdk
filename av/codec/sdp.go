@@ -307,7 +307,7 @@ func channelLayoutFromCount(channels int) av.ChannelLayout {
 	}
 }
 
-func defaultIfZero(v int, fallback int) int {
+func defaultIfZero(v, fallback int) int {
 	if v > 0 {
 		return v
 	}

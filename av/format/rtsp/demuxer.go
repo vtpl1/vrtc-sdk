@@ -1044,7 +1044,7 @@ func (t *rtspTrack) wallClockForRTP(rtpTimestamp uint32) time.Time {
 	return t.srWallClock.Add(offset)
 }
 
-func carryTrackState(oldTracks []*rtspTrack, newTracks []*rtspTrack) {
+func carryTrackState(oldTracks, newTracks []*rtspTrack) {
 	for i, next := range newTracks {
 		var prev *rtspTrack
 
@@ -1367,7 +1367,7 @@ func (a *authState) applyChallenge(header string) bool {
 	return a.nonce != ""
 }
 
-func (a *authState) authorization(method string, uri string) string {
+func (a *authState) authorization(method, uri string) string {
 	switch a.kind {
 	case authNone:
 		return ""

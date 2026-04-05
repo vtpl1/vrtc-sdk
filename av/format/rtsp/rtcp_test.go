@@ -77,7 +77,7 @@ func TestTrackHandleRTCPAndWallClock(t *testing.T) {
 	}
 }
 
-func makeSenderReportPacket(ssrc uint32, ntpSeconds uint32, ntpFraction uint32, rtpTimestamp uint32) []byte {
+func makeSenderReportPacket(ssrc, ntpSeconds, ntpFraction, rtpTimestamp uint32) []byte {
 	packet := make([]byte, 28)
 	packet[0] = 0x80
 	packet[1] = rtcpTypeSenderReport

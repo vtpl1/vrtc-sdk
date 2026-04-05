@@ -408,7 +408,7 @@ func (m *Muxer) MediaStartPos() int64 {
 
 // VideoTrackInfo returns the MP4 track ID and timescale of the first video
 // track, or ok=false if the muxer has no video tracks.
-func (m *Muxer) VideoTrackInfo() (trackID uint32, timescale uint32, ok bool) {
+func (m *Muxer) VideoTrackInfo() (trackID, timescale uint32, ok bool) {
 	for _, ts := range m.tracks {
 		if ts.hasVideo {
 			return ts.id, ts.timescale, true
