@@ -33,7 +33,8 @@ recordings/
 hls/
 logs/
 session/
-config/
 configs/
+# config/ is a Go package — do not ignore it
+!config/
 .claude/
 .*go*cache*/
