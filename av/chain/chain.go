@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/vtpl1/vrtc-sdk/av"
@@ -48,9 +49,10 @@ type GapDetector interface {
 // fail fast on a bad first segment. Subsequent demuxers are obtained lazily
 // from the SegmentSource.
 //
-// ChainingDemuxer is not safe for concurrent use; it is designed for a
-// single consumer goroutine's read loop.
+// Close is safe to call concurrently with ReadPacket; all other methods must
+// be called from a single goroutine.
 type ChainingDemuxer struct {
+	mu            sync.Mutex
 	source        SegmentSource
 	cur           av.DemuxCloser
 	dtsOff        time.Duration // cumulative DTS offset for current segment
@@ -78,7 +80,15 @@ func NewChainingDemuxer(first av.DemuxCloser, source SegmentSource) *ChainingDem
 // It also stores the returned streams for codec-change detection at the next
 // segment boundary.
 func (c *ChainingDemuxer) GetCodecs(ctx context.Context) ([]av.Stream, error) {
-	streams, err := c.cur.GetCodecs(ctx)
+	c.mu.Lock()
+	cur := c.cur
+	c.mu.Unlock()
+
+	if cur == nil {
+		return nil, io.EOF
+	}
+
+	streams, err := cur.GetCodecs(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +106,15 @@ func (c *ChainingDemuxer) GetCodecs(ctx context.Context) ([]av.Stream, error) {
 // Returns io.EOF when the SegmentSource is exhausted.
 func (c *ChainingDemuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 	for {
-		pkt, err := c.cur.ReadPacket(ctx)
+		c.mu.Lock()
+		cur := c.cur
+		c.mu.Unlock()
+
+		if cur == nil {
+			return av.Packet{}, io.EOF
+		}
+
+		pkt, err := cur.ReadPacket(ctx)
 		if err == nil {
 			pkt.DTS += c.dtsOff
 
@@ -124,15 +142,20 @@ func (c *ChainingDemuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 		}
 
 		// Current segment exhausted — advance to the next.
-		_ = c.cur.Close()
-		c.cur = nil
+		_ = cur.Close()
 
 		next, err := c.source.Next(ctx)
 		if err != nil {
+			c.mu.Lock()
+			c.cur = nil
+			c.mu.Unlock()
+
 			return av.Packet{}, err // io.EOF propagates when source is done
 		}
 
+		c.mu.Lock()
 		c.cur = next
+		c.mu.Unlock()
 
 		// Check if the source reports a wall-clock gap at this transition.
 		if gd, ok := c.source.(GapDetector); ok && gd.LastGap() > 0 {
@@ -141,7 +164,7 @@ func (c *ChainingDemuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 
 		// Read the init segment (GetCodecs) from the new segment and
 		// compare with the previous segment's codecs to detect changes.
-		newStreams, gerr := c.cur.GetCodecs(ctx)
+		newStreams, gerr := next.GetCodecs(ctx)
 		if gerr != nil {
 			return av.Packet{}, gerr
 		}
@@ -155,13 +178,16 @@ func (c *ChainingDemuxer) ReadPacket(ctx context.Context) (av.Packet, error) {
 	}
 }
 
-// Close closes the currently active demuxer. Safe to call multiple times.
+// Close closes the currently active demuxer. Safe to call multiple times
+// and concurrently with ReadPacket.
 func (c *ChainingDemuxer) Close() error {
-	if c.cur != nil {
-		err := c.cur.Close()
-		c.cur = nil
+	c.mu.Lock()
+	cur := c.cur
+	c.cur = nil
+	c.mu.Unlock()
 
-		return err
+	if cur != nil {
+		return cur.Close()
 	}
 
 	return nil
@@ -198,9 +224,13 @@ func (c *ChainingDemuxer) Seek(
 	}
 
 	// Close the current demuxer.
-	if c.cur != nil {
-		_ = c.cur.Close()
-		c.cur = nil
+	c.mu.Lock()
+	cur := c.cur
+	c.cur = nil
+	c.mu.Unlock()
+
+	if cur != nil {
+		_ = cur.Close()
 	}
 
 	dmx, err := ss.OpenAt(ctx, wallTime)
@@ -234,7 +264,10 @@ func (c *ChainingDemuxer) Seek(
 		}
 	}
 
+	c.mu.Lock()
 	c.cur = dmx
+	c.mu.Unlock()
+
 	c.dtsOff = 0
 	c.lastEnd = 0
 
