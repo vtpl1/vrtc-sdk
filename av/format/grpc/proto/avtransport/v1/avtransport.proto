@@ -176,9 +176,9 @@ message IngestAnalyticsRequest {
   int64 frame_id = 2;
   // wall_clock_ms is the avgrabber wall-clock as Unix milliseconds.
   // Millisecond precision is sufficient: the analytics pipeline sources its
-  // wall-clock from the captureMs field in WS analytics text frames, which
-  // is inherently millisecond-resolution. Sub-millisecond accuracy is not
-  // meaningful for frame-level analytics correlation (matchTolerance = 200 ms).
+  // wall-clock from the {"type":"timing","wallClock":"..."} WS text frames,
+  // which are inherently millisecond-resolution. Sub-millisecond accuracy is
+  // not meaningful for frame-level analytics correlation (matchTolerance = 200 ms).
   int64 wall_clock_ms = 3;
   FrameAnalytics analytics = 4;
 }

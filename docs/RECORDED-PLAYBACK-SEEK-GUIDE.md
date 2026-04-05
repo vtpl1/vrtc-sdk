@@ -17,7 +17,7 @@ This guide explains how to implement recorded video playback with frame-accurate
   │                      │                  │    ├─ segment2.fmp4       │
   │                      │  3. Analytics    │    └─ ...                 │
   │  Event Overlay ◀─────┼──JSON text ──────┼─▶ emsg / FrameAnalytics  │
-  │  (wall-clock)        │  frames          │    (captureMs field)      │
+  │  (wall-clock)        │  frames          │    (capture field)        │
   └──────────────────────┘                  └──────────────────────────┘
 ```
 
@@ -204,8 +204,8 @@ function handleTextMessage(
     return;
   }
 
-  // Analytics event (FrameAnalytics JSON)
-  if (msg.type === undefined && 'captureMs' in (msg as any)) {
+  // Analytics event (FrameAnalytics JSON — no "type" field, has "capture")
+  if (msg.type === undefined && 'capture' in (msg as any)) {
     handleAnalyticsEvent(state, video, msg as FrameAnalytics);
   }
 }
@@ -321,9 +321,9 @@ interface FrameAnalytics {
   siteId: number;
   channelId: number;
   framePts: number;       // camera PTS ticks
-  captureMs: number;      // wall-clock epoch ms when frame was captured
-  captureEndMs: number;
-  inferenceMs: number;    // wall-clock epoch ms when inference completed
+  capture: string;        // wall-clock when frame was captured (RFC3339ms, e.g. "2026-04-04T14:31:58.123Z")
+  captureEnd: string;     // wall-clock end of capture/exposure window (RFC3339ms)
+  inference: string;      // wall-clock when inference completed (RFC3339ms)
   refWidth: number;       // frame dimensions for bbox normalisation
   refHeight: number;
   vehicleCount: number;
@@ -349,7 +349,7 @@ function handleAnalyticsEvent(
   analytics: FrameAnalytics,
 ): void {
   // Convert analytics wall-clock to media time
-  const eventWallClock = new Date(analytics.captureMs);
+  const eventWallClock = new Date(analytics.capture);
   const mediaTime = wallClockToMediaTime(state, eventWallClock);
 
   // Schedule overlay at the right video time
