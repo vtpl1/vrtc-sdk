@@ -36,6 +36,4 @@ session/
 config/
 configs/
 .claude/
-.gocache/
-.gomodcache/
-.golangci-cache/
+.*go*cache*/
