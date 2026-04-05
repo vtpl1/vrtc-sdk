@@ -24,7 +24,7 @@ func marshalPacket(pkt av.Packet) *pb.AVPacket {
 	}
 
 	if !pkt.WallClockTime.IsZero() {
-		p.WallClockNs = pkt.WallClockTime.UnixNano()
+		p.WallClockMs = pkt.WallClockTime.UnixMilli()
 	}
 
 	if pkt.Analytics != nil {
@@ -56,8 +56,8 @@ func unmarshalPacket(p *pb.AVPacket) (av.Packet, error) {
 		Data:            p.GetData(),
 	}
 
-	if p.GetWallClockNs() != 0 {
-		pkt.WallClockTime = time.Unix(0, p.GetWallClockNs())
+	if p.GetWallClockMs() != 0 {
+		pkt.WallClockTime = time.UnixMilli(p.GetWallClockMs())
 	}
 
 	if p.GetAnalytics() != nil {

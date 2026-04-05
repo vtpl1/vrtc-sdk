@@ -124,8 +124,10 @@ message AVPacket {
   int64 dts_ns = 6;
   int64 pts_offset_ns = 7;
   int64 duration_ns = 8;
-  // Wall-clock time as UnixNano; 0 means not set.
-  int64 wall_clock_ns = 9;
+  // Wall-clock time as Unix milliseconds; 0 means not set.
+  // Millisecond precision is sufficient: the avgrabber source provides ms and
+  // video frames arrive at 25–30 fps (~33 ms apart).
+  int64 wall_clock_ms = 9;
   bytes data = 10;
   FrameAnalytics analytics = 11;
   // Non-empty on a keyframe that follows a codec parameter-set change.
@@ -156,3 +158,29 @@ message Detection {
   int64 track_id = 7;
   bool is_event = 8;
 }
+
+// ── Analytics Ingestion (analytics tool → edge) ───────────────
+
+// AnalyticsIngestionService receives analytics results from an external
+// inference engine and injects them back into the edge pipeline.
+service AnalyticsIngestionService {
+  // IngestAnalytics streams analytics results from the analytics tool to edge.
+  // The client keeps the stream open for the lifetime of the session.
+  rpc IngestAnalytics(stream IngestAnalyticsRequest) returns (IngestAnalyticsResponse);
+}
+
+message IngestAnalyticsRequest {
+  // source_id identifies the camera / channel (matches RelayHub sourceID).
+  string source_id = 1;
+  // frame_id is the camera PTS ticks (av.Packet.FrameID) for correlation.
+  int64 frame_id = 2;
+  // wall_clock_ms is the avgrabber wall-clock as Unix milliseconds.
+  // Millisecond precision is sufficient: the analytics pipeline sources its
+  // wall-clock from the captureMs field in WS analytics text frames, which
+  // is inherently millisecond-resolution. Sub-millisecond accuracy is not
+  // meaningful for frame-level analytics correlation (matchTolerance = 200 ms).
+  int64 wall_clock_ms = 3;
+  FrameAnalytics analytics = 4;
+}
+
+message IngestAnalyticsResponse {}

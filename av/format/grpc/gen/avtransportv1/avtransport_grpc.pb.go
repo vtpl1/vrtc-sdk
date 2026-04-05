@@ -286,3 +286,109 @@ var AVTransportService_ServiceDesc = grpc.ServiceDesc{
 	},
 	Metadata: "avtransport/v1/avtransport.proto",
 }
+
+const (
+	AnalyticsIngestionService_IngestAnalytics_FullMethodName = "/avtransport.v1.AnalyticsIngestionService/IngestAnalytics"
+)
+
+// AnalyticsIngestionServiceClient is the client API for AnalyticsIngestionService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// AnalyticsIngestionService receives analytics results from an external
+// inference engine and injects them back into the edge pipeline.
+type AnalyticsIngestionServiceClient interface {
+	// IngestAnalytics streams analytics results from the analytics tool to edge.
+	// The client keeps the stream open for the lifetime of the session.
+	IngestAnalytics(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[IngestAnalyticsRequest, IngestAnalyticsResponse], error)
+}
+
+type analyticsIngestionServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewAnalyticsIngestionServiceClient(cc grpc.ClientConnInterface) AnalyticsIngestionServiceClient {
+	return &analyticsIngestionServiceClient{cc}
+}
+
+func (c *analyticsIngestionServiceClient) IngestAnalytics(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[IngestAnalyticsRequest, IngestAnalyticsResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &AnalyticsIngestionService_ServiceDesc.Streams[0], AnalyticsIngestionService_IngestAnalytics_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[IngestAnalyticsRequest, IngestAnalyticsResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AnalyticsIngestionService_IngestAnalyticsClient = grpc.ClientStreamingClient[IngestAnalyticsRequest, IngestAnalyticsResponse]
+
+// AnalyticsIngestionServiceServer is the server API for AnalyticsIngestionService service.
+// All implementations must embed UnimplementedAnalyticsIngestionServiceServer
+// for forward compatibility.
+//
+// AnalyticsIngestionService receives analytics results from an external
+// inference engine and injects them back into the edge pipeline.
+type AnalyticsIngestionServiceServer interface {
+	// IngestAnalytics streams analytics results from the analytics tool to edge.
+	// The client keeps the stream open for the lifetime of the session.
+	IngestAnalytics(grpc.ClientStreamingServer[IngestAnalyticsRequest, IngestAnalyticsResponse]) error
+	mustEmbedUnimplementedAnalyticsIngestionServiceServer()
+}
+
+// UnimplementedAnalyticsIngestionServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedAnalyticsIngestionServiceServer struct{}
+
+func (UnimplementedAnalyticsIngestionServiceServer) IngestAnalytics(grpc.ClientStreamingServer[IngestAnalyticsRequest, IngestAnalyticsResponse]) error {
+	return status.Error(codes.Unimplemented, "method IngestAnalytics not implemented")
+}
+func (UnimplementedAnalyticsIngestionServiceServer) mustEmbedUnimplementedAnalyticsIngestionServiceServer() {
+}
+func (UnimplementedAnalyticsIngestionServiceServer) testEmbeddedByValue() {}
+
+// UnsafeAnalyticsIngestionServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to AnalyticsIngestionServiceServer will
+// result in compilation errors.
+type UnsafeAnalyticsIngestionServiceServer interface {
+	mustEmbedUnimplementedAnalyticsIngestionServiceServer()
+}
+
+func RegisterAnalyticsIngestionServiceServer(s grpc.ServiceRegistrar, srv AnalyticsIngestionServiceServer) {
+	// If the following call panics, it indicates UnimplementedAnalyticsIngestionServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&AnalyticsIngestionService_ServiceDesc, srv)
+}
+
+func _AnalyticsIngestionService_IngestAnalytics_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(AnalyticsIngestionServiceServer).IngestAnalytics(&grpc.GenericServerStream[IngestAnalyticsRequest, IngestAnalyticsResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AnalyticsIngestionService_IngestAnalyticsServer = grpc.ClientStreamingServer[IngestAnalyticsRequest, IngestAnalyticsResponse]
+
+// AnalyticsIngestionService_ServiceDesc is the grpc.ServiceDesc for AnalyticsIngestionService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var AnalyticsIngestionService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "avtransport.v1.AnalyticsIngestionService",
+	HandlerType: (*AnalyticsIngestionServiceServer)(nil),
+	Methods:     []grpc.MethodDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "IngestAnalytics",
+			Handler:       _AnalyticsIngestionService_IngestAnalytics_Handler,
+			ClientStreams: true,
+		},
+	},
+	Metadata: "avtransport/v1/avtransport.proto",
+}

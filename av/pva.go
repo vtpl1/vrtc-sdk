@@ -22,6 +22,11 @@ type Detection struct {
 //
 // Correlation: FramePTS matches av.Packet.FrameID (camera PTS ticks).
 // CaptureMS matches av.Packet.WallClockTime for temporal alignment.
+//
+// Timing precision: all timing fields use Unix milliseconds (int64). Millisecond
+// resolution is sufficient — video frames arrive at 25–30 fps (~33 ms apart) and
+// the AnalyticsStore match tolerance is 200 ms, so sub-millisecond accuracy adds
+// no value to frame correlation or latency measurement.
 type FrameAnalytics struct {
 	// ── Source identity ───────────────────────────────────────────────
 	SiteID    int32 `bson:"site_id"    json:"siteId"`
@@ -30,8 +35,8 @@ type FrameAnalytics struct {
 	// ── Frame correlation ────────────────────────────────────────────
 	FramePTS     int64 `bson:"frame_pts"      json:"framePts"`     // camera PTS ticks — matches Packet.FrameID
 	CaptureMS    int64 `bson:"capture_ms"     json:"captureMs"`    // wall-clock ms when frame was captured
-	CaptureEndMS int64 `bson:"capture_end_ms" json:"captureEndMs"` // wall-clock ms end of capture window
-	InferenceMS  int64 `bson:"inference_ms"   json:"inferenceMs"`  // wall-clock ms when inference completed
+	CaptureEndMS int64 `bson:"capture_end_ms" json:"captureEndMs"` // wall-clock ms end of capture/exposure window
+	InferenceMS  int64 `bson:"inference_ms"   json:"inferenceMs"`  // wall-clock ms when inference completed (Unix ms)
 
 	// ── Reference frame dimensions (for normalizing bbox coords) ────
 	RefWidth  int32 `bson:"ref_width"  json:"refWidth"`

@@ -914,8 +914,10 @@ type AVPacket struct {
 	DtsNs       int64 `protobuf:"varint,6,opt,name=dts_ns,json=dtsNs,proto3" json:"dts_ns,omitempty"`
 	PtsOffsetNs int64 `protobuf:"varint,7,opt,name=pts_offset_ns,json=ptsOffsetNs,proto3" json:"pts_offset_ns,omitempty"`
 	DurationNs  int64 `protobuf:"varint,8,opt,name=duration_ns,json=durationNs,proto3" json:"duration_ns,omitempty"`
-	// Wall-clock time as UnixNano; 0 means not set.
-	WallClockNs int64           `protobuf:"varint,9,opt,name=wall_clock_ns,json=wallClockNs,proto3" json:"wall_clock_ns,omitempty"`
+	// Wall-clock time as Unix milliseconds; 0 means not set.
+	// Millisecond precision is sufficient: the avgrabber source provides ms and
+	// video frames arrive at 25–30 fps (~33 ms apart).
+	WallClockMs int64           `protobuf:"varint,9,opt,name=wall_clock_ms,json=wallClockMs,proto3" json:"wall_clock_ms,omitempty"`
 	Data        []byte          `protobuf:"bytes,10,opt,name=data,proto3" json:"data,omitempty"`
 	Analytics   *FrameAnalytics `protobuf:"bytes,11,opt,name=analytics,proto3" json:"analytics,omitempty"`
 	// Non-empty on a keyframe that follows a codec parameter-set change.
@@ -1010,9 +1012,9 @@ func (x *AVPacket) GetDurationNs() int64 {
 	return 0
 }
 
-func (x *AVPacket) GetWallClockNs() int64 {
+func (x *AVPacket) GetWallClockMs() int64 {
 	if x != nil {
-		return x.WallClockNs
+		return x.WallClockMs
 	}
 	return 0
 }
@@ -1262,6 +1264,117 @@ func (x *Detection) GetIsEvent() bool {
 	return false
 }
 
+type IngestAnalyticsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// source_id identifies the camera / channel (matches RelayHub sourceID).
+	SourceId string `protobuf:"bytes,1,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`
+	// frame_id is the camera PTS ticks (av.Packet.FrameID) for correlation.
+	FrameId int64 `protobuf:"varint,2,opt,name=frame_id,json=frameId,proto3" json:"frame_id,omitempty"`
+	// wall_clock_ms is the avgrabber wall-clock as Unix milliseconds.
+	// Millisecond precision is sufficient: the analytics pipeline sources its
+	// wall-clock from the captureMs field in WS analytics text frames, which
+	// is inherently millisecond-resolution. Sub-millisecond accuracy is not
+	// meaningful for frame-level analytics correlation (matchTolerance = 200 ms).
+	WallClockMs   int64           `protobuf:"varint,3,opt,name=wall_clock_ms,json=wallClockMs,proto3" json:"wall_clock_ms,omitempty"`
+	Analytics     *FrameAnalytics `protobuf:"bytes,4,opt,name=analytics,proto3" json:"analytics,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IngestAnalyticsRequest) Reset() {
+	*x = IngestAnalyticsRequest{}
+	mi := &file_avtransport_v1_avtransport_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IngestAnalyticsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IngestAnalyticsRequest) ProtoMessage() {}
+
+func (x *IngestAnalyticsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_avtransport_v1_avtransport_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IngestAnalyticsRequest.ProtoReflect.Descriptor instead.
+func (*IngestAnalyticsRequest) Descriptor() ([]byte, []int) {
+	return file_avtransport_v1_avtransport_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *IngestAnalyticsRequest) GetSourceId() string {
+	if x != nil {
+		return x.SourceId
+	}
+	return ""
+}
+
+func (x *IngestAnalyticsRequest) GetFrameId() int64 {
+	if x != nil {
+		return x.FrameId
+	}
+	return 0
+}
+
+func (x *IngestAnalyticsRequest) GetWallClockMs() int64 {
+	if x != nil {
+		return x.WallClockMs
+	}
+	return 0
+}
+
+func (x *IngestAnalyticsRequest) GetAnalytics() *FrameAnalytics {
+	if x != nil {
+		return x.Analytics
+	}
+	return nil
+}
+
+type IngestAnalyticsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IngestAnalyticsResponse) Reset() {
+	*x = IngestAnalyticsResponse{}
+	mi := &file_avtransport_v1_avtransport_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IngestAnalyticsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IngestAnalyticsResponse) ProtoMessage() {}
+
+func (x *IngestAnalyticsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_avtransport_v1_avtransport_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IngestAnalyticsResponse.ProtoReflect.Descriptor instead.
+func (*IngestAnalyticsResponse) Descriptor() ([]byte, []int) {
+	return file_avtransport_v1_avtransport_proto_rawDescGZIP(), []int{19}
+}
+
 var File_avtransport_v1_avtransport_proto protoreflect.FileDescriptor
 
 const file_avtransport_v1_avtransport_proto_rawDesc = "" +
@@ -1331,7 +1444,7 @@ const file_avtransport_v1_avtransport_proto_rawDesc = "" +
 	"\rpts_offset_ns\x18\a \x01(\x03R\vptsOffsetNs\x12\x1f\n" +
 	"\vduration_ns\x18\b \x01(\x03R\n" +
 	"durationNs\x12\"\n" +
-	"\rwall_clock_ns\x18\t \x01(\x03R\vwallClockNs\x12\x12\n" +
+	"\rwall_clock_ms\x18\t \x01(\x03R\vwallClockMs\x12\x12\n" +
 	"\x04data\x18\n" +
 	" \x01(\fR\x04data\x12<\n" +
 	"\tanalytics\x18\v \x01(\v2\x1e.avtransport.v1.FrameAnalyticsR\tanalytics\x129\n" +
@@ -1363,7 +1476,13 @@ const file_avtransport_v1_avtransport_proto_rawDesc = "" +
 	"confidence\x18\x06 \x01(\rR\n" +
 	"confidence\x12\x19\n" +
 	"\btrack_id\x18\a \x01(\x03R\atrackId\x12\x19\n" +
-	"\bis_event\x18\b \x01(\bR\aisEvent2\xca\x03\n" +
+	"\bis_event\x18\b \x01(\bR\aisEvent\"\xb2\x01\n" +
+	"\x16IngestAnalyticsRequest\x12\x1b\n" +
+	"\tsource_id\x18\x01 \x01(\tR\bsourceId\x12\x19\n" +
+	"\bframe_id\x18\x02 \x01(\x03R\aframeId\x12\"\n" +
+	"\rwall_clock_ms\x18\x03 \x01(\x03R\vwallClockMs\x12<\n" +
+	"\tanalytics\x18\x04 \x01(\v2\x1e.avtransport.v1.FrameAnalyticsR\tanalytics\"\x19\n" +
+	"\x17IngestAnalyticsResponse2\xca\x03\n" +
 	"\x12AVTransportService\x12U\n" +
 	"\n" +
 	"PushStream\x12!.avtransport.v1.PushStreamRequest\x1a\".avtransport.v1.PushStreamResponse(\x01\x12U\n" +
@@ -1372,7 +1491,9 @@ const file_avtransport_v1_avtransport_proto_rawDesc = "" +
 	"\vPauseStream\x12\".avtransport.v1.PauseStreamRequest\x1a#.avtransport.v1.PauseStreamResponse\x12Y\n" +
 	"\fResumeStream\x12#.avtransport.v1.ResumeStreamRequest\x1a$.avtransport.v1.ResumeStreamResponse\x12S\n" +
 	"\n" +
-	"SeekStream\x12!.avtransport.v1.SeekStreamRequest\x1a\".avtransport.v1.SeekStreamResponseB<Z:github.com/vtpl1/vrtc-sdk/av/format/grpc/gen/avtransportv1b\x06proto3"
+	"SeekStream\x12!.avtransport.v1.SeekStreamRequest\x1a\".avtransport.v1.SeekStreamResponse2\x81\x01\n" +
+	"\x19AnalyticsIngestionService\x12d\n" +
+	"\x0fIngestAnalytics\x12&.avtransport.v1.IngestAnalyticsRequest\x1a'.avtransport.v1.IngestAnalyticsResponse(\x01B<Z:github.com/vtpl1/vrtc-sdk/av/format/grpc/gen/avtransportv1b\x06proto3"
 
 var (
 	file_avtransport_v1_avtransport_proto_rawDescOnce sync.Once
@@ -1386,26 +1507,28 @@ func file_avtransport_v1_avtransport_proto_rawDescGZIP() []byte {
 	return file_avtransport_v1_avtransport_proto_rawDescData
 }
 
-var file_avtransport_v1_avtransport_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_avtransport_v1_avtransport_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_avtransport_v1_avtransport_proto_goTypes = []any{
-	(*PushStreamRequest)(nil),    // 0: avtransport.v1.PushStreamRequest
-	(*PushStreamResponse)(nil),   // 1: avtransport.v1.PushStreamResponse
-	(*PullStreamRequest)(nil),    // 2: avtransport.v1.PullStreamRequest
-	(*PullStreamResponse)(nil),   // 3: avtransport.v1.PullStreamResponse
-	(*PauseStreamRequest)(nil),   // 4: avtransport.v1.PauseStreamRequest
-	(*PauseStreamResponse)(nil),  // 5: avtransport.v1.PauseStreamResponse
-	(*ResumeStreamRequest)(nil),  // 6: avtransport.v1.ResumeStreamRequest
-	(*ResumeStreamResponse)(nil), // 7: avtransport.v1.ResumeStreamResponse
-	(*SeekStreamRequest)(nil),    // 8: avtransport.v1.SeekStreamRequest
-	(*SeekStreamResponse)(nil),   // 9: avtransport.v1.SeekStreamResponse
-	(*StreamHeader)(nil),         // 10: avtransport.v1.StreamHeader
-	(*StreamTrailer)(nil),        // 11: avtransport.v1.StreamTrailer
-	(*StreamInfo)(nil),           // 12: avtransport.v1.StreamInfo
-	(*VideoCodecConfig)(nil),     // 13: avtransport.v1.VideoCodecConfig
-	(*AudioCodecConfig)(nil),     // 14: avtransport.v1.AudioCodecConfig
-	(*AVPacket)(nil),             // 15: avtransport.v1.AVPacket
-	(*FrameAnalytics)(nil),       // 16: avtransport.v1.FrameAnalytics
-	(*Detection)(nil),            // 17: avtransport.v1.Detection
+	(*PushStreamRequest)(nil),       // 0: avtransport.v1.PushStreamRequest
+	(*PushStreamResponse)(nil),      // 1: avtransport.v1.PushStreamResponse
+	(*PullStreamRequest)(nil),       // 2: avtransport.v1.PullStreamRequest
+	(*PullStreamResponse)(nil),      // 3: avtransport.v1.PullStreamResponse
+	(*PauseStreamRequest)(nil),      // 4: avtransport.v1.PauseStreamRequest
+	(*PauseStreamResponse)(nil),     // 5: avtransport.v1.PauseStreamResponse
+	(*ResumeStreamRequest)(nil),     // 6: avtransport.v1.ResumeStreamRequest
+	(*ResumeStreamResponse)(nil),    // 7: avtransport.v1.ResumeStreamResponse
+	(*SeekStreamRequest)(nil),       // 8: avtransport.v1.SeekStreamRequest
+	(*SeekStreamResponse)(nil),      // 9: avtransport.v1.SeekStreamResponse
+	(*StreamHeader)(nil),            // 10: avtransport.v1.StreamHeader
+	(*StreamTrailer)(nil),           // 11: avtransport.v1.StreamTrailer
+	(*StreamInfo)(nil),              // 12: avtransport.v1.StreamInfo
+	(*VideoCodecConfig)(nil),        // 13: avtransport.v1.VideoCodecConfig
+	(*AudioCodecConfig)(nil),        // 14: avtransport.v1.AudioCodecConfig
+	(*AVPacket)(nil),                // 15: avtransport.v1.AVPacket
+	(*FrameAnalytics)(nil),          // 16: avtransport.v1.FrameAnalytics
+	(*Detection)(nil),               // 17: avtransport.v1.Detection
+	(*IngestAnalyticsRequest)(nil),  // 18: avtransport.v1.IngestAnalyticsRequest
+	(*IngestAnalyticsResponse)(nil), // 19: avtransport.v1.IngestAnalyticsResponse
 }
 var file_avtransport_v1_avtransport_proto_depIdxs = []int32{
 	10, // 0: avtransport.v1.PushStreamRequest.header:type_name -> avtransport.v1.StreamHeader
@@ -1420,21 +1543,24 @@ var file_avtransport_v1_avtransport_proto_depIdxs = []int32{
 	16, // 9: avtransport.v1.AVPacket.analytics:type_name -> avtransport.v1.FrameAnalytics
 	12, // 10: avtransport.v1.AVPacket.new_codecs:type_name -> avtransport.v1.StreamInfo
 	17, // 11: avtransport.v1.FrameAnalytics.objects:type_name -> avtransport.v1.Detection
-	0,  // 12: avtransport.v1.AVTransportService.PushStream:input_type -> avtransport.v1.PushStreamRequest
-	2,  // 13: avtransport.v1.AVTransportService.PullStream:input_type -> avtransport.v1.PullStreamRequest
-	4,  // 14: avtransport.v1.AVTransportService.PauseStream:input_type -> avtransport.v1.PauseStreamRequest
-	6,  // 15: avtransport.v1.AVTransportService.ResumeStream:input_type -> avtransport.v1.ResumeStreamRequest
-	8,  // 16: avtransport.v1.AVTransportService.SeekStream:input_type -> avtransport.v1.SeekStreamRequest
-	1,  // 17: avtransport.v1.AVTransportService.PushStream:output_type -> avtransport.v1.PushStreamResponse
-	3,  // 18: avtransport.v1.AVTransportService.PullStream:output_type -> avtransport.v1.PullStreamResponse
-	5,  // 19: avtransport.v1.AVTransportService.PauseStream:output_type -> avtransport.v1.PauseStreamResponse
-	7,  // 20: avtransport.v1.AVTransportService.ResumeStream:output_type -> avtransport.v1.ResumeStreamResponse
-	9,  // 21: avtransport.v1.AVTransportService.SeekStream:output_type -> avtransport.v1.SeekStreamResponse
-	17, // [17:22] is the sub-list for method output_type
-	12, // [12:17] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	16, // 12: avtransport.v1.IngestAnalyticsRequest.analytics:type_name -> avtransport.v1.FrameAnalytics
+	0,  // 13: avtransport.v1.AVTransportService.PushStream:input_type -> avtransport.v1.PushStreamRequest
+	2,  // 14: avtransport.v1.AVTransportService.PullStream:input_type -> avtransport.v1.PullStreamRequest
+	4,  // 15: avtransport.v1.AVTransportService.PauseStream:input_type -> avtransport.v1.PauseStreamRequest
+	6,  // 16: avtransport.v1.AVTransportService.ResumeStream:input_type -> avtransport.v1.ResumeStreamRequest
+	8,  // 17: avtransport.v1.AVTransportService.SeekStream:input_type -> avtransport.v1.SeekStreamRequest
+	18, // 18: avtransport.v1.AnalyticsIngestionService.IngestAnalytics:input_type -> avtransport.v1.IngestAnalyticsRequest
+	1,  // 19: avtransport.v1.AVTransportService.PushStream:output_type -> avtransport.v1.PushStreamResponse
+	3,  // 20: avtransport.v1.AVTransportService.PullStream:output_type -> avtransport.v1.PullStreamResponse
+	5,  // 21: avtransport.v1.AVTransportService.PauseStream:output_type -> avtransport.v1.PauseStreamResponse
+	7,  // 22: avtransport.v1.AVTransportService.ResumeStream:output_type -> avtransport.v1.ResumeStreamResponse
+	9,  // 23: avtransport.v1.AVTransportService.SeekStream:output_type -> avtransport.v1.SeekStreamResponse
+	19, // 24: avtransport.v1.AnalyticsIngestionService.IngestAnalytics:output_type -> avtransport.v1.IngestAnalyticsResponse
+	19, // [19:25] is the sub-list for method output_type
+	13, // [13:19] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_avtransport_v1_avtransport_proto_init() }
@@ -1462,9 +1588,9 @@ func file_avtransport_v1_avtransport_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_avtransport_v1_avtransport_proto_rawDesc), len(file_avtransport_v1_avtransport_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   18,
+			NumMessages:   20,
 			NumExtensions: 0,
-			NumServices:   1,
+			NumServices:   2,
 		},
 		GoTypes:           file_avtransport_v1_avtransport_proto_goTypes,
 		DependencyIndexes: file_avtransport_v1_avtransport_proto_depIdxs,
