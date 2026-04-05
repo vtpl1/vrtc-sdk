@@ -7,7 +7,9 @@
 //  2. Server sends:  {"type":"mse","value":"video/mp4; codecs=\"hvc1.1.6.L153.B0,flac\""} (text)
 //  3. Server sends:  fMP4 init segment (binary)
 //  4. Server sends:  fMP4 media fragments (binary) as they are produced
-//  5. If a packet carries Analytics, the analytics object is JSON-marshalled and
+//  5. On each fragment flush a {"type":"timing","wallClock":"<RFC3339ms>"} text
+//     frame is sent, carrying the packet's wall-clock for continuous time sync.
+//  6. If a packet carries Analytics, the analytics object is JSON-marshalled and
 //     sent as an additional text frame.
 package mse
 
@@ -248,6 +250,19 @@ func (m *MSEWriter) WritePacket(ctx context.Context, pkt av.Packet) error {
 	if len(data) > 0 {
 		if err := m.broadcast(outFrame{messageBinary, data}); err != nil {
 			return err
+		}
+
+		// Emit a timing text frame on every fragment flush so WS clients can
+		// track wall-clock continuously without relying on analytics.
+		if !pkt.WallClockTime.IsZero() {
+			if tm, jerr := json.Marshal(wsMessage{
+				Type:  "timing",
+				Value: pkt.WallClockTime.UTC().Format(av.RFC3339Milli),
+			}); jerr == nil {
+				if err := m.broadcast(outFrame{messageText, tm}); err != nil {
+					return err
+				}
+			}
 		}
 	}
 
