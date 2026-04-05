@@ -46,7 +46,7 @@ Where `streamStartWallClock` is the wall-clock time the frontend sent as the `st
 
 ## API Reference
 
-### 1. Timeline: `GET /api/timeline/{camera_id}`
+### 1. Timeline: `GET /api/cameras/{camera_id}/timeline`
 
 Returns available recording periods for the timeline bar.
 
@@ -136,7 +136,7 @@ async function fetchTimeline(
     start: start.toISOString(),
     end: end.toISOString(),
   });
-  const res = await fetch(`/api/timeline/${cameraId}?${params}`);
+  const res = await fetch(`/api/cameras/${cameraId}/timeline?${params}`);
   return res.json();
 }
 ```
@@ -469,11 +469,12 @@ function startTimeSync(state: PlaybackState, video: HTMLVideoElement): void {
 
 | Stage | Precision | Who | Mechanism |
 |-------|-----------|-----|-----------|
-| Segment lookup | exact | Server | MemStore index maps wall-clock -> segment file |
-| Keyframe seek | ~1s (GOP interval) | Server | `SeekToKeyframe()` scans moof boxes by DTS |
-| Frame display | 1 frame (50ms @ 20fps) | Browser | MSE decodes from keyframe, `video.currentTime` snaps to nearest frame |
+| Segment lookup | exact | Server | SQLite recording index maps wall-clock → segment file |
+| Fragment seek (with sidx) | ~2s (fragment interval) | Server | `SeekToKeyframe()` binary-searches the `sidx` box written at segment close |
+| Fragment seek (no sidx) | ~1s (GOP interval) | Server | `SeekToKeyframe()` scans `moof` boxes sequentially (fallback for old recordings) |
+| Frame display | 1 frame (33–40ms @ 25–30fps) | Browser | MSE decodes from keyframe; `video.currentTime` snaps to the nearest frame |
 
-**Effective end-to-end precision: 1 frame** (the browser covers the ~1s gap between keyframe and target by decoding all intermediate frames).
+**Effective end-to-end precision: 1 frame.** All segments written by `SegmentMuxer` include a `sidx` box, enabling O(log N) random access within a segment. The browser covers the remaining sub-GOP gap by decoding forward from the keyframe.
 
 ## Timing Diagram
 
@@ -544,9 +545,10 @@ In follow mode, `video.currentTime` continues to grow as new fragments arrive. T
 ## Quick Reference
 
 ```
-Timeline API:       GET  /api/recording/timeline?camera_id=ID&start=RFC3339&end=RFC3339
+Timeline API:       GET  /api/cameras/{camera_id}/timeline?start=RFC3339&end=RFC3339
+Recordings API:     GET  /api/cameras/{camera_id}/recordings?start=RFC3339&end=RFC3339
 Playback (HTTP):    GET  /api/cameras/{camera_id}/stream?start=RFC3339
-Playback (WS):      WS   /api/cameras/ws/stream?camera_id=ID&start=RFC3339
+Playback (WS):      WS   /api/cameras/ws/stream?cameraId=ID&start=RFC3339
 
 Wall-clock -> mediaTime:  (wallClock.getTime() - streamStartWallClock.getTime()) / 1000
 mediaTime -> wall-clock:  new Date(streamStartWallClock.getTime() + video.currentTime * 1000)

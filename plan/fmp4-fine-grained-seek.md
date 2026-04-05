@@ -1,5 +1,12 @@
 # fMP4 Fine-Grained Seek (10ms granularity)
 
+**Status: Complete.** Both phases are implemented and integrated.
+
+- Phase 1 — `fmp4.Demuxer.SeekToKeyframe` + `ChainingDemuxer` seek: `av/format/fmp4/demuxer.go`, `av/chain/chain.go`
+- Phase 2 — sidx write on segment close: `av/format/fmp4/muxer.go` (`BuildSidx`, `FragIndex`, `VideoTrackInfo`, `MediaStartPos`), `av/segment/muxer.go` (`writeSidx` called from `Close`)
+
+---
+
 ## Problem
 
 Recorded playback seek currently lands on the nearest segment boundary (~7 min / 64MB chunks), then reads sequentially from segment start until the first keyframe. Effective granularity is one GOP interval (1-2 seconds). Target is 10ms-level seek.
